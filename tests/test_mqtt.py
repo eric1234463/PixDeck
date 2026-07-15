@@ -98,3 +98,37 @@ class TestPublisher(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+import json as _json
+import pixbar_core as core
+
+
+class _FakePub:
+    def __init__(self):
+        self.calls = []
+    def publish(self, topic, payload, retain=None):
+        self.calls.append((topic, payload))
+    def close(self):
+        pass
+
+
+class TestPushRouting(unittest.TestCase):
+    def tearDown(self):
+        core.configure_transport(mode="http")     # reset global state
+
+    def test_mqtt_mode_publishes_to_custom_topic(self):
+        fake = _FakePub()
+        core._transport.update({"mode": "mqtt", "publisher": fake, "prefix": "ulanzi_1bf6"})
+        frame = {"duration": 5, "text": []}
+        core.push("192.168.1.9", "stock", frame)
+        self.assertEqual(fake.calls, [("ulanzi_1bf6/custom/stock", _json.dumps(frame))])
+
+    def test_mqtt_preempt_still_blocks_non_force(self):
+        import time
+        fake = _FakePub()
+        core._transport.update({"mode": "mqtt", "publisher": fake, "prefix": "p"})
+        core._preempt["stock"] = time.monotonic() + 100     # host preempted
+        core.push("192.168.1.9", "stock", {"x": 1})         # non-force -> dropped
+        self.assertEqual(fake.calls, [])
+        core._preempt.pop("stock", None)
