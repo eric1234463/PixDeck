@@ -38,5 +38,13 @@ export interface Status {
   runners: Record<string, Runner>
   attachTypes: AttachType[]
   attachments: Record<string, Attachment>
+  transport?: Transport
+}
+export interface Transport {
+  transport: 'http' | 'mqtt'
+  broker: string
+  prefix: string
+  retain: boolean
+  hasAuth?: boolean
 }
 export interface GeoResult { label: string; value: string }

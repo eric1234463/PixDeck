@@ -6,6 +6,8 @@ const enc = encodeURIComponent
 export const api = {
   getStatus: (): Promise<Status> => fetch('/api/status').then((r) => r.json()),
   setDevice: (ip: string) => post(`/api/device?ip=${enc(ip)}`),
+  setTransport: (t: { mode: 'http' | 'mqtt'; broker: string; prefix: string; user: string; pass: string; retain: boolean }) =>
+    post(`/api/transport?mode=${t.mode}&broker=${enc(t.broker)}&prefix=${enc(t.prefix)}&user=${enc(t.user)}&pass=${enc(t.pass)}&retain=${t.retain ? 1 : 0}`),
   toggle: (app: string, on: boolean, interval: number) =>
     post(`/api/toggle?app=${enc(app)}&on=${on ? 1 : 0}&interval=${interval}`),
   pushOnce: (app: string) => post(`/api/pushonce?app=${enc(app)}`),
