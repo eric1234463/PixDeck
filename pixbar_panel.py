@@ -89,6 +89,25 @@ def valid_device(s):
     if sep and (not port.isdigit() or not (1 <= int(port) <= 65535)):
         return ""
     return s
+
+
+def valid_broker(s):
+    """校验 MQTT broker 地址: 私网 IPv4(可带端口), 且额外允许环回 —— 本机跑 broker(如
+    127.0.0.1:1883 的 mosquitto)很常见。仍挡住公网/元数据(169.254.x)。broker 由本地用户在
+    设置里自填、连接由本机发起, 不同于设备寻址, 允许环回是安全的。"""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    host, sep, port = s.partition(":")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return ""
+    if ip.version != 4 or not ip.is_private or ip.is_link_local:   # is_private 含环回; 只挡公网/链路本地
+        return ""
+    if sep and (not port.isdigit() or not (1 <= int(port) <= 65535)):
+        return ""
+    return s
 _ALL = core.discover(os.path.join(HERE, "plugins"))
 PLUGINS = {m.APP: m for m in _ALL if not getattr(m, "ATTACH", False)}        # 主信息流插件
 ATTACH_TYPES = {m.APP: m for m in _ALL if getattr(m, "ATTACH", False)}       # 附属推送类型(模板)
@@ -451,8 +470,8 @@ class Handler(BaseHTTPRequestHandler):
             if mode not in ("http", "mqtt"):
                 return self._send(400, json.dumps({"error": "mode must be http|mqtt"}))
             broker = (q.get("broker") or [""])[0]
-            if mode == "mqtt" and not valid_device(broker):
-                return self._send(400, json.dumps({"error": "broker 需私网 IPv4(可带端口)"}))
+            if mode == "mqtt" and not valid_broker(broker):
+                return self._send(400, json.dumps({"error": "broker 需私网 IPv4(可带端口, 允许 127.0.0.1)"}))
             t = {"transport": mode, "broker": broker, "prefix": (q.get("prefix") or [""])[0],
                  "mqtt_user": (q.get("user") or [""])[0], "mqtt_pass": (q.get("pass") or [""])[0],
                  "retain": (q.get("retain") or ["0"])[0] == "1"}

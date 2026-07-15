@@ -58,6 +58,7 @@ class _StubBroker:
 
     def _run(self):
         c, _ = self.srv.accept()
+        self.srv.close()                          # 只收一个连接, 关掉监听 socket 免 ResourceWarning
         # read CONNECT: fixed header(1) + remlen + body
         c.recv(1); rl, _ = self._recv_remlen(c); self._recv_exact(c, rl)
         c.sendall(b"\x20\x02\x00\x00")            # CONNACK accepted
@@ -164,3 +165,12 @@ class TestPanelTransportConfig(unittest.TestCase):
         self.assertEqual(t["transport"], "mqtt")
         self.assertEqual(t["prefix"], "ulanzi_1bf6")
         self.assertTrue(t["retain"])
+
+    def test_valid_broker_allows_loopback_and_private_blocks_public(self):
+        vb = self.panel.valid_broker
+        self.assertEqual(vb("127.0.0.1:1883"), "127.0.0.1:1883")   # 本机 broker 允许(与 valid_device 不同)
+        self.assertEqual(vb("192.168.1.5"), "192.168.1.5")         # 私网允许
+        self.assertEqual(vb("8.8.8.8:1883"), "")                   # 公网挡住
+        self.assertEqual(vb("169.254.169.254"), "")               # 元数据/链路本地挡住
+        self.assertEqual(self.panel.valid_device("127.0.0.1"), "")  # 设备仍禁环回(不受影响)
+

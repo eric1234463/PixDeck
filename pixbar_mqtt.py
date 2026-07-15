@@ -104,7 +104,7 @@ class MqttPublisher:
         self._lock = threading.Lock()
 
     def _connect_locked(self):
-        s = socket.create_connection((self.host, self.port), timeout=10)
+        s = socket.create_connection((self.host, self.port), timeout=3)   # 短超时: broker 挂时不长时间卡住推送
         s.sendall(encode_connect(self.client_id, self.username, self.password, self.keepalive))
         ack = _recv_exact(s, 4)
         if not ack or (ack[0] >> 4) != 2:
