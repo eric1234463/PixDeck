@@ -73,3 +73,69 @@ def decode_publish(data):
     if qos > 0:
         i += 2
     return topic, data[i:end], retain
+
+
+def _recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return buf
+
+
+class MqttPublisher:
+    """线程安全的 MQTT 发布端: 惰性连接 + 出错重连。QoS 0, 不发保活 PING。
+
+    push 频率高时连接自然保持热; 空闲被 broker 断开后, 下次 publish 会重连。
+    keepalive=0 通知 broker 不做保活, 避免空闲期被动断连。
+    """
+    def __init__(self, host, port=1883, client_id="pixdeck",
+                 username=None, password=None, keepalive=0, retain=False):
+        self.host = host
+        self.port = int(port or 1883)
+        self.client_id = client_id or "pixdeck"
+        self.username = username or None
+        self.password = password or None
+        self.keepalive = keepalive
+        self.retain = retain
+        self._sock = None
+        self._lock = threading.Lock()
+
+    def _connect_locked(self):
+        s = socket.create_connection((self.host, self.port), timeout=10)
+        s.sendall(encode_connect(self.client_id, self.username, self.password, self.keepalive))
+        ack = _recv_exact(s, 4)
+        if not ack or (ack[0] >> 4) != 2:
+            s.close()
+            raise OSError("no CONNACK")
+        self._sock = s
+
+    def _close_locked(self):
+        if self._sock:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    def publish(self, topic, payload, retain=None):
+        """发布一帧。失败自动重连重试一次; 仍失败则抛 OSError(由调用方记日志)。"""
+        r = self.retain if retain is None else retain
+        pkt = encode_publish(topic, payload, qos=0, retain=r)
+        with self._lock:
+            for attempt in (1, 2):
+                try:
+                    if self._sock is None:
+                        self._connect_locked()
+                    self._sock.sendall(pkt)
+                    return
+                except OSError:
+                    self._close_locked()
+                    if attempt == 2:
+                        raise
+
+    def close(self):
+        with self._lock:
+            self._close_locked()
