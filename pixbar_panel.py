@@ -19,22 +19,58 @@ WEB_DIST = os.path.join(HERE, "web", "dist")
 CONFIG_PATH = os.path.join(HERE, ".pixbar.json")          # 本地配置(设备 IP 等), 不入库
 
 
-def load_device():
-    """读取上次在界面里设置并记住的设备 IP; 没有则返回空串。"""
+def _load_config():
     try:
         with open(CONFIG_PATH) as f:
-            return str(json.load(f).get("device", ""))
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
     except Exception:
-        return ""
+        return {}
+
+
+def _save_config(d):
+    try:
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(d, f)
+    except Exception:
+        pass
+
+
+def load_device():
+    """读取上次在界面里设置并记住的设备 IP; 没有则返回空串。"""
+    return str(_load_config().get("device", ""))
 
 
 def save_device(ip):
     """把界面设置的设备 IP 写到本地配置, 重启后仍记得。"""
-    try:
-        with open(CONFIG_PATH, "w") as f:
-            json.dump({"device": ip}, f)
-    except Exception:
-        pass
+    d = _load_config(); d["device"] = ip; _save_config(d)
+
+
+TRANSPORT_KEYS = ("transport", "broker", "prefix", "mqtt_user", "mqtt_pass", "retain")
+
+
+def load_transport():
+    d = _load_config()
+    return {"transport": d.get("transport", "http"), "broker": d.get("broker", ""),
+            "prefix": d.get("prefix", ""), "mqtt_user": d.get("mqtt_user", ""),
+            "mqtt_pass": d.get("mqtt_pass", ""), "retain": bool(d.get("retain", False))}
+
+
+def save_transport(t):
+    d = _load_config()
+    for k in TRANSPORT_KEYS:
+        if k in t:
+            d[k] = t[k]
+    _save_config(d)
+
+
+def apply_transport(t):
+    """把持久化配置套用到 core(mqtt 时拆 broker host:port)。"""
+    host, _, port = str(t.get("broker", "")).partition(":")
+    core.configure_transport(mode=t.get("transport", "http"), broker_host=host,
+                             broker_port=int(port) if port.isdigit() else 1883,
+                             prefix=t.get("prefix", ""), username=t.get("mqtt_user") or None,
+                             password=t.get("mqtt_pass") or None, retain=bool(t.get("retain")))
 
 
 def valid_device(s):
@@ -378,6 +414,10 @@ class Handler(BaseHTTPRequestHandler):
             with STATE_LOCK:                       # 防与并发的 attach 增删争用 → "dict changed size"
                 att_items = list(ATTACHMENTS.items())
             st["attachments"] = {aid: a.snapshot() for aid, a in att_items}
+            _t = load_transport()
+            st["transport"] = {"transport": _t["transport"], "broker": _t["broker"],
+                               "prefix": _t["prefix"], "retain": _t["retain"],
+                               "hasAuth": bool(_t["mqtt_user"])}
             return self._send(200, json.dumps(st))
         if u.path == "/api/geocode":                  # 城市搜索(中文转拼音 + 按人口排序 + 去重)
             q = (parse_qs(u.query).get("q") or [""])[0]
@@ -406,6 +446,19 @@ class Handler(BaseHTTPRequestHandler):
             Handler.device = cand
             save_device(cand)                     # 记住, 重启后仍生效
             return self._send(200, json.dumps({"device": cand}))
+        if u.path == "/api/transport":
+            mode = (q.get("mode") or ["http"])[0]
+            if mode not in ("http", "mqtt"):
+                return self._send(400, json.dumps({"error": "mode must be http|mqtt"}))
+            broker = (q.get("broker") or [""])[0]
+            if mode == "mqtt" and not valid_device(broker):
+                return self._send(400, json.dumps({"error": "broker 需私网 IPv4(可带端口)"}))
+            t = {"transport": mode, "broker": broker, "prefix": (q.get("prefix") or [""])[0],
+                 "mqtt_user": (q.get("user") or [""])[0], "mqtt_pass": (q.get("pass") or [""])[0],
+                 "retain": (q.get("retain") or ["0"])[0] == "1"}
+            save_transport(t)
+            apply_transport(t)
+            return self._send(200, json.dumps({"ok": True, "transport": mode}))
         # ---- 画板整屏推送: body 为 JSON {pixels:[832], duration?} ----
         if u.path == "/api/canvas/push":
             try:
@@ -498,6 +551,7 @@ def main():
         print(f"警告: 设备地址 {raw!r} 不是有效私网 IPv4, 已忽略 — 请在网页里填")
     if args.device is not None and Handler.device:
         save_device(Handler.device)          # 命令行显式指定且合法时也记住
+    apply_transport(load_transport())
     # 启动时清掉设备上本工具插件的残留组件(都处于"未运行"状态), 使 DIY 组件显示与开关一致
     if Handler.device:
         cl = device_get(Handler.device, "/api/customList")

@@ -132,3 +132,35 @@ class TestPushRouting(unittest.TestCase):
         core.push("192.168.1.9", "stock", {"x": 1})         # non-force -> dropped
         self.assertEqual(fake.calls, [])
         core._preempt.pop("stock", None)
+
+
+import importlib.util as _ilu
+
+
+def _load_panel():
+    path = os.path.join(ROOT, "pixbar_panel.py")
+    spec = _ilu.spec_from_file_location("pixbar_panel", path)
+    m = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+class TestPanelTransportConfig(unittest.TestCase):
+    def setUp(self):
+        self.panel = _load_panel()
+        self.tmp = os.path.join(ROOT, ".pixbar_test.json")
+        self.panel.CONFIG_PATH = self.tmp
+
+    def tearDown(self):
+        if os.path.exists(self.tmp):
+            os.remove(self.tmp)
+
+    def test_transport_roundtrip_preserves_device(self):
+        self.panel.save_device("192.168.1.9")
+        self.panel.save_transport({"transport": "mqtt", "broker": "192.168.1.5:1883",
+                                   "prefix": "ulanzi_1bf6", "retain": True})
+        self.assertEqual(self.panel.load_device(), "192.168.1.9")   # device untouched
+        t = self.panel.load_transport()
+        self.assertEqual(t["transport"], "mqtt")
+        self.assertEqual(t["prefix"], "ulanzi_1bf6")
+        self.assertTrue(t["retain"])
