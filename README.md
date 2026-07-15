@@ -42,6 +42,8 @@ There's also a **Canvas** tab: a 52×16 pixel editor to draw by hand, stamp text
 
 A local server (`pixbar_panel.py`, pure Python standard library) runs each plugin in a thread, serves the web app, and proxies the device's HTTP API — all bound to `127.0.0.1`. Your browser talks only to this local server, which talks to your clock over the LAN. Plugins live in `plugins/<name>/` and are auto-discovered.
 
+You can also switch the push transport to **MQTT** in Settings — frames are published to `<prefix>/custom/<app>` on your broker instead of POSTed over HTTP (the frame format is identical, so every plugin works either way). This needs an MQTT broker that both the app and the clock connect to; the topic prefix comes from the device's own MQTT config.
+
 > **Works with the device's official (stock) firmware only.** PixDeck drives the clock through that firmware's *Custom App HTTP protocol* — which is exactly why it needs no flashing. A reflashed / custom firmware would drop that protocol and would not work with PixDeck unless it reimplemented it.
 
 ## License
