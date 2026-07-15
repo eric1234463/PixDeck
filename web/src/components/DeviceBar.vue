@@ -13,6 +13,10 @@ async function save(ip: string) {
   showSettings.value = false
   emit('changed')
 }
+async function saveTransport(t: { mode: 'http' | 'mqtt'; broker: string; prefix: string; user: string; pass: string; retain: boolean }) {
+  await api.setTransport(t)
+  emit('changed')
+}
 </script>
 
 <template>
@@ -43,7 +47,8 @@ async function save(ip: string) {
       </template>
       <span v-else class="muted">无</span>
     </div>
-    <SettingsModal v-if="showSettings" :device="status?.device || ''" @save="save" @close="showSettings = false" />
+    <SettingsModal v-if="showSettings" :device="status?.device || ''" :transport="status?.transport"
+      @save="save" @saveTransport="saveTransport" @close="showSettings = false" />
   </section>
 </template>
 
