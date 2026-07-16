@@ -30,16 +30,38 @@ import json, os, threading, time, unicodedata, importlib.util, urllib.request
 _preempt = {}                       # app -> 抢占到期的 monotonic 时刻
 _preempt_lock = threading.Lock()
 
+# ---- 传输层: HTTP(默认) 或 MQTT ----
+# 帧 JSON 两种传输完全一致; 只是 http POST 到设备, mqtt 发布到 <prefix>/custom/<app>。
+_transport = {"mode": "http", "publisher": None, "prefix": "", "retain": False}
+
+
+def configure_transport(mode="http", broker_host="", broker_port=1883, prefix="",
+                        username=None, password=None, retain=False):
+    """设置传输方式。mqtt 时创建/替换发布端。面板在设置或启动时调用。"""
+    old = _transport.get("publisher")
+    if old:
+        old.close()
+    pub = None
+    if mode == "mqtt":
+        import pixbar_mqtt
+        pub = pixbar_mqtt.MqttPublisher(broker_host, broker_port,
+                                        username=username, password=password, retain=retain)
+    _transport.update({"mode": mode, "publisher": pub, "prefix": prefix, "retain": retain})
+
 
 def push(device, app, frame, force=False):
-    """把一帧画面 POST 到设备 DIY 组件 app。app 正被附属抢占且非 force 时, 丢弃本次推送。"""
+    """把一帧画面发到设备 DIY 组件 app。app 正被附属抢占且非 force 时, 丢弃本次推送。
+    传输为 mqtt 时发布到 <prefix>/custom/<app>, 否则 POST 到设备 HTTP。"""
     if not force:
         with _preempt_lock:
             if _preempt.get(app, 0) > time.monotonic():
                 return
-    body = json.dumps(frame).encode()
+    body = json.dumps(frame)
+    if _transport["mode"] == "mqtt" and _transport["publisher"]:
+        _transport["publisher"].publish(f"{_transport['prefix']}/custom/{app}", body)
+        return
     req = urllib.request.Request(f"http://{device}/api/custom?name={app}",
-                                 data=body, headers={"Content-Type": "application/json"}, method="POST")
+                                 data=body.encode(), headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=10) as r:
         r.read()
 
