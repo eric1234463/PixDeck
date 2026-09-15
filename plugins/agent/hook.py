@@ -3,6 +3,8 @@
 
 Claude Code 每次 hook 事件调用本脚本, 事件名走 argv[1], session_id 从 stdin JSON 取。
 每个会话一份 ~/.pixdeck/agent/<session>.json; 写时 flock, 免得并发事件互相覆盖。
+Notification 不在 STATE 里: 它在回合结束时也会 fire(在 Stop 之后), 会把 idle 盖成 wait;
+不映射它就只刷新 ts(让会话留在活跃窗口内), 状态保持不变。
 插件读这个目录就知道: 几个会话在跑、谁在执行、谁在等你回应、几个子 agent。
 
 注册方式见同目录 README.md。本脚本永远 exit 0 且不输出, 不影响 Claude Code。
@@ -14,7 +16,7 @@ STATE = {                                   # 事件 -> 会话状态
     "SessionStart": "idle",
     "UserPromptSubmit": "busy", "PreToolUse": "busy",
     "PostToolUse": "busy", "PostToolUseFailure": "busy",
-    "Notification": "wait", "PermissionRequest": "wait",
+    "PermissionRequest": "wait",        # 只有权限请求才算"等你回应"
     "Stop": "idle", "StopFailure": "idle",
 }
 SUB_DELTA = {"SubagentStart": 1, "SubagentStop": -1}
