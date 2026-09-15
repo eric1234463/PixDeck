@@ -28,7 +28,7 @@ ACTIVE, SUB = 180, 40               # 活跃会话窗 / 子agent 窗(秒)
 CPU_BUSY = 8.0                      # claude 进程 CPU 超此值视为"正在生成"
 TICK = 0.4                          # 推帧/动画节奏
 POLL_EVERY = 5                      # 每 5 帧(2s)重新扫描一次状态
-GRAY, SUBC, DIM = "#5B626D", "#FFD000", "#2A3038"
+SUBC, DIM = "#FFD000", "#2A3038"
 AMBER = "#FF6400"                   # 等你回应(权限请求/通知)
 CLAUDE = "#D97757"                  # Claude 品牌橙: 小人常驻此色, 不用颜色区分状态
 
@@ -39,10 +39,11 @@ CLAUDE = "#D97757"                  # Claude 品牌橙: 小人常驻此色, 不�
 #   ..############..
 #   ...#.#....#.#...   <- 四条腿
 # 状态不靠颜色, 靠形态: 闲=躺平闭眼+飘 Z; 忙=扛锄头走路(腿交替+锄头挥动); 等待=睁眼+闪问号。
-SX, SY = 0, 3                       # 小人在 52x16 上的左上角
+SX, SY = 0, 4                       # 小人在 52x16 上的左上角; 留出 y0..3 给头顶的 Z
 BODY, ARMS = (2, 0, 12, 8), (0, 4, 16, 2)
 EYES, LEGS = (4, 11), (3, 5, 10, 12)
-SLEEP_BODY, SLEEP_ARMS = (2, 5, 12, 5), (0, 7, 16, 2)   # 睡: 身体压扁并落到底部
+ZZZ = {"Z": ("###", ".#.", "###")}  # 头顶 3x3 的 Z; 三态小人尺寸一致, 睡觉只闭眼 + 飘 Z
+ZX = 6                              # Z 的 x: 对准身体中线
 BG = "#000000"                      # 挖眼用: 设备底色
 # 锄头两帧: (手柄起点x,y, 终点x,y, 锄刃x,y) — 扛起 / 落地, 与走路同步 = 一边走一边锄
 HOE = [((16, 4), (19, 1), (19, 0)), ((16, 5), (19, 8), (19, 8))]
@@ -58,34 +59,31 @@ FONT35 = {"5": ("###", "#..", "###", "..#", "###"),
           "D": ("##.", "#.#", "#.#", "#.#", "##.")}
 
 
-def label(x, y, text, color):
-    """3x5 迷你字标签, 一条 db 位图指令(比逐段 df 省字节)。color 为 0xRRGGBB 整数。"""
-    gs = [FONT35[c] for c in text]
+def label(x, y, text, color, font=FONT35):
+    """迷你字标签, 一条 db 位图指令(比逐段 df 省字节)。color 为 0xRRGGBB 整数。"""
+    gs = [font[c] for c in text]
     px = []
-    for r in range(5):
+    for r in range(len(gs[0])):
         for i, g in enumerate(gs):
             px += [color if g[r][c] == "#" else 0 for c in range(3)]
             if i < len(gs) - 1:
                 px.append(0)                        # 字间 1px 空隙
-    return {"db": [x, y, len(text) * 4 - 1, 5, px]}
+    return {"db": [x, y, len(text) * 4 - 1, len(gs[0]), px]}
 
 
 def little(color, walk=None, sleep=False):
-    """小人的 draw 指令。walk=0/1: 两组腿交替长短 + 扛锄头挥动; sleep: 躺平闭眼。"""
-    body, arms = (SLEEP_BODY, SLEEP_ARMS) if sleep else (BODY, ARMS)
-    legy, legh = (body[1] + body[3], 1) if sleep else (8, 2)
-    d = [{"df": [body[0] + SX, body[1] + SY, body[2], body[3], color]},
-         {"df": [arms[0] + SX, arms[1] + SY, arms[2], arms[3], color]}]
+    """小人的 draw 指令。三态共用同一尺寸; walk=0/1: 腿交替长短 + 扛锄头挥动; sleep: 闭眼。"""
+    d = [{"df": [BODY[0] + SX, BODY[1] + SY, BODY[2], BODY[3], color]},
+         {"df": [ARMS[0] + SX, ARMS[1] + SY, ARMS[2], ARMS[3], color]}]
     for i, x in enumerate(LEGS):
-        h = legh if walk is None or i % 2 == walk else 1
-        d.append({"df": [x + SX, legy + SY, 1, h, color]})
+        h = 2 if walk is None or i % 2 == walk else 1
+        d.append({"df": [x + SX, 8 + SY, 1, h, color]})
     if walk is not None:                                 # 手上的锄头
         (hx, hy), (tx, ty), (bx, by) = HOE[walk]
         d.append({"dl": [hx + SX, hy + SY, tx + SX, ty + SY, color]})      # 手柄
         d.append({"df": [bx + SX, by + SY, 2, 2, color]})                  # 锄刃
     for x in EYES:
-        ey = body[1] + 1 if sleep else 2        # 睡: 眼睛落在身体上半, 别打到手臂那条横杠
-        d.append({"df": [x - 1 + SX, ey + SY, 3, 1, BG]} if sleep         # 闭眼: 一横(3 宽, 与睁眼同心)
+        d.append({"df": [x - 1 + SX, 3 + SY, 3, 1, BG]} if sleep          # 闭眼: 一横(3 宽, 与睁眼同心)
                  else {"df": [x + SX, 2 + SY, 1, 2, BG]})                 # 睁眼: 竖缝
     return d
 
@@ -170,9 +168,8 @@ def render(sessions, subs, busy, wait, phase, interval):
     if wait:                                       # 等你回应: 问号闪烁
         if (phase // 2) % 2 == 0:
             text.append({"content": "?", "fontHeight": 10, "x": BADGEX, "y": 3, "color": AMBER})
-    elif not busy:                                 # 闲: Z 慢慢上下飘
-        text.append({"content": "Z", "fontHeight": 10, "x": BADGEX,
-                     "y": 2 if (phase // 4) % 2 else 4, "color": GRAY})
+    elif not busy:                                 # 闲: 头顶的 Z 慢慢上下飘
+        draw.append(label(ZX, (phase // 4) % 2, "Z", 0x5B626D, ZZZ))
     for k in range(min(subs, 4)):                  # 底部子agent 黄点
         draw.append({"df": [DOTX + k * 3, 14, 2, 2, SUBC]})
     return {"duration": interval, "text": text, "draw": draw}
