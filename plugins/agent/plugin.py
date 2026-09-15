@@ -6,7 +6,7 @@
 - 活跃会话 = ~/.claude/projects/*/*.jsonl 中近 ACTIVE 秒内有更新的(每份=一个会话)。
 - 正在执行(busy) = 任一 claude 进程 CPU 超阈值(工具等待期间 transcript 不动, 故用 CPU 补)。
 - 子 agent = 各会话 <session>/subagents/ 下近 SUB 秒内活动的 transcript 数。
-画面: 左侧 Claude Code 小人常驻; 忙=走路, 等你回应=闪问号, 闲=闭眼飘 Z; 右侧会话数, 底部黄点=子 agent 数。
+画面: 左侧 Claude Code 小人常驻; 忙=扛锄头走路, 等你回应=闪问号, 闲=躺平睡觉飘 Z; 右侧会话数, 底部黄点=子 agent 数。
 
 单独运行: python3 plugins/agent/plugin.py [--device IP] [--dry-run] [--once]
 """
@@ -37,24 +37,34 @@ CLAUDE = "#D97757"                  # Claude 品牌橙: 小人常驻此色, 不�
 #   ################   <- 手臂横贯全宽
 #   ..############..
 #   ...#.#....#.#...   <- 四条腿
-# 状态不靠颜色, 靠形态: 闲=闭眼+飘 Z; 忙=四条腿交替长短(走路); 等待=睁眼+闪问号。
+# 状态不靠颜色, 靠形态: 闲=躺平闭眼+飘 Z; 忙=扛锄头走路(腿交替+锄头挥动); 等待=睁眼+闪问号。
 SX, SY = 0, 3                       # 小人在 52x16 上的左上角
 BODY, ARMS = (2, 0, 12, 8), (0, 4, 16, 2)
 EYES, LEGS = (4, 11), (3, 5, 10, 12)
+SLEEP_BODY, SLEEP_ARMS = (2, 5, 12, 5), (0, 7, 16, 2)   # 睡: 身体压扁并落到底部
 BG = "#000000"                      # 挖眼用: 设备底色
+# 锄头两帧: (手柄起点x,y, 终点x,y, 锄刃x,y) — 扛起 / 落地, 与走路同步 = 一边走一边锄
+HOE = [((16, 4), (19, 1), (19, 0)), ((16, 5), (19, 8), (19, 8))]
 BADGEX, COUNTX, DOTX = 19, 33, 19   # "Z"/"?" / 会话数 / 子agent 黄点 的 x
 
 
 def little(color, walk=None, sleep=False):
-    """小人的 draw 指令。walk=0/1 时两组腿交替长短(走路动画); sleep 时眼睛闭成一横。"""
-    d = [{"df": [BODY[0] + SX, BODY[1] + SY, BODY[2], BODY[3], color]},
-         {"df": [ARMS[0] + SX, ARMS[1] + SY, ARMS[2], ARMS[3], color]}]
+    """小人的 draw 指令。walk=0/1: 两组腿交替长短 + 扛锄头挥动; sleep: 躺平闭眼。"""
+    body, arms = (SLEEP_BODY, SLEEP_ARMS) if sleep else (BODY, ARMS)
+    legy, legh = (body[1] + body[3], 1) if sleep else (8, 2)
+    d = [{"df": [body[0] + SX, body[1] + SY, body[2], body[3], color]},
+         {"df": [arms[0] + SX, arms[1] + SY, arms[2], arms[3], color]}]
     for i, x in enumerate(LEGS):
-        h = 2 if walk is None or i % 2 == walk else 1
-        d.append({"df": [x + SX, 8 + SY, 1, h, color]})
+        h = legh if walk is None or i % 2 == walk else 1
+        d.append({"df": [x + SX, legy + SY, 1, h, color]})
+    if walk is not None:                                 # 手上的锄头
+        (hx, hy), (tx, ty), (bx, by) = HOE[walk]
+        d.append({"dl": [hx + SX, hy + SY, tx + SX, ty + SY, color]})      # 手柄
+        d.append({"df": [bx + SX, by + SY, 2, 2, color]})                  # 锄刃
     for x in EYES:
-        d.append({"df": [x - 1 + SX, 3 + SY, 3, 1, BG]} if sleep     # 闭眼: 一横(3 宽, 与睁眼同心)
-                 else {"df": [x + SX, 2 + SY, 1, 2, BG]})            # 睁眼: 竖缝
+        ey = body[1] + 1 if sleep else 2        # 睡: 眼睛落在身体上半, 别打到手臂那条横杠
+        d.append({"df": [x - 1 + SX, ey + SY, 3, 1, BG]} if sleep         # 闭眼: 一横(3 宽, 与睁眼同心)
+                 else {"df": [x + SX, 2 + SY, 1, 2, BG]})                 # 睁眼: 竖缝
     return d
 
 
