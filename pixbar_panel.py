@@ -563,6 +563,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default=None, help="设备 IP(可选; 不填则用上次界面里设置的, 或留空在网页里填)")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--start", default="", help="启动后自动开启的插件(逗号分隔), 如 --start agent")
     args = ap.parse_args()
     raw = args.device if args.device is not None else load_device()
     Handler.device = valid_device(raw)       # 私网 IPv4 校验; 非法则视为未设置
@@ -580,6 +581,11 @@ def main():
                     core.push(Handler.device, name, {}, force=True)
                 except Exception:
                     pass
+    for name in [x.strip() for x in args.start.split(",") if x.strip()]:
+        if name in RUNNERS:
+            RUNNERS[name].start(Handler.device, RUNNERS[name].mod.DEFAULT_INTERVAL)
+        else:
+            print(f"警告: --start {name} 不是已发现的插件, 已忽略")
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"pixbar_panel -> http://127.0.0.1:{args.port}  (device {Handler.device or '未设置 — 在网页里填'})")
     print(f"plugins: {', '.join(RUNNERS) or '(none)'}")

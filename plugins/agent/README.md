@@ -54,3 +54,23 @@ python3 plugins/agent/plugin.py --dry-run --once     # 应打印 sessions=1 busy
 
 画面帧走框架统一的传输层：面板设置里选 HTTP（默认，POST 到设备）或 MQTT
 （发布到 `<prefix>/custom/agent`）。插件本身不关心用哪种。
+
+## 开机自启（macOS）
+
+面板不记忆插件开关，重启后 agent 是关的。用 `--start` 让它自己开：
+
+```bash
+python3 pixbar_panel.py --start agent
+```
+
+配成登录项就用 launchd，放一份 `~/Library/LaunchAgents/com.pixdeck.panel.plist`：
+`ProgramArguments` 填 `/usr/bin/python3 <PIXDECK>/pixbar_panel.py --start agent`，
+加 `RunAtLoad` + `KeepAlive`（崩了自动拉起），日志指到 `~/Library/Logs/pixdeck.log`。
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.pixdeck.panel.plist   # 装
+launchctl kickstart -k gui/$(id -u)/com.pixdeck.panel                             # 改完代码重启
+launchctl bootout gui/$(id -u)/com.pixdeck.panel                                  # 卸
+```
+
+hook 本身不需要常驻进程：它写在 `~/.claude/settings.json` 里，每个会话自己触发。
