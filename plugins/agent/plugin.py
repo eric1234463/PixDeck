@@ -28,7 +28,7 @@ ACTIVE, SUB = 180, 40               # 活跃会话窗 / 子agent 窗(秒)
 CPU_BUSY = 8.0                      # claude 进程 CPU 超此值视为"正在生成"
 TICK = 0.4                          # 推帧/动画节奏
 POLL_EVERY = 5                      # 每 5 帧(2s)重新扫描一次状态
-WHITE, GRAY, SUBC, DIM = "#E9EBEE", "#5B626D", "#FFD000", "#2A3038"
+GRAY, SUBC, DIM = "#5B626D", "#FFD000", "#2A3038"
 AMBER = "#FF6400"                   # 等你回应(权限请求/通知)
 CLAUDE = "#D97757"                  # Claude 品牌橙: 小人常驻此色, 不用颜色区分状态
 
@@ -46,9 +46,28 @@ SLEEP_BODY, SLEEP_ARMS = (2, 5, 12, 5), (0, 7, 16, 2)   # 睡: 身体压扁并�
 BG = "#000000"                      # 挖眼用: 设备底色
 # 锄头两帧: (手柄起点x,y, 终点x,y, 锄刃x,y) — 扛起 / 落地, 与走路同步 = 一边走一边锄
 HOE = [((16, 4), (19, 1), (19, 0)), ((16, 5), (19, 8), (19, 8))]
-BADGEX, DOTX = 16, 19               # "Z"/"?" 占 x16..21(一个字 6px), 正好在小人与用量条之间
-BARX, BARW = 23, 27                 # 用量条: 上=5 小时窗, 下=7 天窗; 留 1px 与徽标分开
-BAR5H_Y, BAR7D_Y = 5, 10
+BADGEX, DOTX = 16, 19               # "Z"/"?" 占 x16..21(一个字 6px), 在小人与用量区之间
+# 用量区 x23..50: 左边 3x5 迷你字标签, 右边进度条。上排=5 小时窗, 下排=7 天窗。
+# 设备字体 fontHeight 10 太高, 上下两排会互相压, 所以标签自己画。
+LABELX, BARX, BARW = 23, 32, 19
+ROW5H, ROW7D = 1, 9                 # 两排的顶端 y
+C5H, C7D = 0x00E5FF, 0x4285F4       # 青 / 蓝 — 两条窗口一眼分得开
+FONT35 = {"5": ("###", "#..", "###", "..#", "###"),
+          "7": ("###", "..#", ".#.", ".#.", ".#."),
+          "H": ("#.#", "#.#", "###", "#.#", "#.#"),
+          "D": ("##.", "#.#", "#.#", "#.#", "##.")}
+
+
+def label(x, y, text, color):
+    """3x5 迷你字标签, 一条 db 位图指令(比逐段 df 省字节)。color 为 0xRRGGBB 整数。"""
+    gs = [FONT35[c] for c in text]
+    px = []
+    for r in range(5):
+        for i, g in enumerate(gs):
+            px += [color if g[r][c] == "#" else 0 for c in range(3)]
+            if i < len(gs) - 1:
+                px.append(0)                        # 字间 1px 空隙
+    return {"db": [x, y, len(text) * 4 - 1, 5, px]}
 
 
 def little(color, walk=None, sleep=False):
@@ -90,12 +109,13 @@ def read_limits():
     return None if a is None or b is None else (a, b)
 
 
-def bar(y, pct, phase):
-    """一条用量条: 暗底槽 + 亮填充; 用满 90% 以上闪烁提醒。"""
-    d = [{"df": [BARX, y, BARW, 2, DIM]}]
+def usage_row(top, text, pct, rgb, phase):
+    """一排: 3x5 标签 + 进度条(暗底槽 + 彩色填充); 用满 90% 以上闪烁提醒。"""
+    hexc = "#%06X" % rgb
+    d = [label(LABELX, top, text, rgb), {"df": [BARX, top + 1, BARW, 3, DIM]}]
     n = round(pct / 100 * BARW)
     if n and (pct < 90 or (phase // 2) % 2 == 0):
-        d.append({"df": [BARX, y, max(1, n), 2, WHITE]})
+        d.append({"df": [BARX, top + 1, max(1, n), 3, hexc]})
     return d
 
 
@@ -144,7 +164,8 @@ def render(sessions, subs, busy, wait, phase, interval):
     draw = little(CLAUDE, walk=phase % 2 if busy else None, sleep=not busy and not wait)
     lim = read_limits()
     if lim:
-        draw += bar(BAR5H_Y, lim[0], phase) + bar(BAR7D_Y, lim[1], phase)
+        draw += usage_row(ROW5H, "5H", lim[0], C5H, phase)
+        draw += usage_row(ROW7D, "7D", lim[1], C7D, phase)
     text = []
     if wait:                                       # 等你回应: 问号闪烁
         if (phase // 2) % 2 == 0:

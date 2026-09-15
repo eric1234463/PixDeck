@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 开机自启模板: 把 __PIXDECK__ 换成本仓库绝对路径, 拷到 ~/Library/LaunchAgents/ 再 bootstrap。
+     用法见同目录 README.md 的「开机自启」。 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.pixdeck.panel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__PIXDECK__/pixbar_panel.py</string>
+    <string>--start</string>
+    <string>agent</string>
+  </array>
+  <key>WorkingDirectory</key><string>__PIXDECK__</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/pixdeck.log</string>
+  <key>StandardErrorPath</key><string>/tmp/pixdeck.log</string>
+</dict>
+</plist>

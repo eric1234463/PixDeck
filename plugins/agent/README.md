@@ -13,8 +13,10 @@ Claude Code 小人常驻，**状态靠形态而不是颜色**区分；右侧数�
 锄头是一条 `dl` 手柄加一个 2×2 锄刃，两帧坐标在 `HOE`；躺平用 `SLEEP_BODY / SLEEP_ARMS`。
 坐标常量都在 `plugin.py` 顶部。
 
-右侧两条用量条（`x23..49`，各 2px 高）：**上 = 5 小时窗，下 = 7 天窗**。
-暗槽是总量，亮段是已用；任一条到 90% 以上会闪烁。底部黄点 = 并行 subagent 数，最多画 4 个。
+右侧用量区 `x23..50` 两排：**上 = 5 小时窗（青 `#00E5FF`），下 = 7 天窗（蓝 `#4285F4`）**，
+每排左边是 `5H` / `7D` 标签，右边是进度条（暗槽是总量，彩色段是已用），任一条到 90% 以上闪烁。
+标签用自带的 3×5 迷你字（`FONT35`）画成一条 `db`：设备字体最矮也有 fontHeight 10，
+上下两排叠不下。底部黄点 = 并行 subagent 数，最多画 4 个。
 
 ### 用量数据从哪来
 
@@ -83,9 +85,13 @@ python3 plugins/agent/plugin.py --dry-run --once     # 应打印 sessions=1 busy
 python3 pixbar_panel.py --start agent
 ```
 
-配成登录项就用 launchd，放一份 `~/Library/LaunchAgents/com.pixdeck.panel.plist`：
-`ProgramArguments` 填 `/usr/bin/python3 <PIXDECK>/pixbar_panel.py --start agent`，
-加 `RunAtLoad` + `KeepAlive`（崩了自动拉起），日志指到 `~/Library/Logs/pixdeck.log`。
+配成登录项就用 launchd，本目录有现成模板 `com.pixdeck.panel.plist`
+（`RunAtLoad` + `KeepAlive`，崩了自动拉起）：
+
+```bash
+sed "s|__PIXDECK__|$PWD|g" plugins/agent/com.pixdeck.panel.plist \
+  > ~/Library/LaunchAgents/com.pixdeck.panel.plist
+```
 
 ```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.pixdeck.panel.plist   # 装
