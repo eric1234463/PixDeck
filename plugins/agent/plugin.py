@@ -51,6 +51,7 @@ HOE = [((16, 4), (19, 1), (19, 0)), ((16, 5), (19, 8), (19, 8))]
 DOTX = 19                           # 子agent 黄点的 x
 # wait 是唯一需要你动手的状态, 所以给它三重信号: 大问号 + 闪烁边框 + 瞪大眼。
 QX, QY = 17, 3                      # 5x9 大问号的位置(小人 x0..15 与标签 x23 之间)
+QCOL = 0xFFD000                     # 问号用黄; 边框留橙, 两层分得开
 FONTQ = {"?": (".###.", "#...#", "#...#", "....#", "...#.", "..#..", "..#..", ".....", "..#..")}
 # 用量区 x23..50: 左边 3x5 迷你字标签, 右边进度条。上排=5 小时窗, 下排=7 天窗。
 # 设备字体 fontHeight 10 太高, 上下两排会互相压, 所以标签自己画。
@@ -182,7 +183,7 @@ def render(sessions, subs, busy, wait, phase, interval):
         draw += usage_row(ROW5H, "5H", lim[0], C5H, phase)
         draw += usage_row(ROW7D, "7D", lim[1], C7D, phase)
     if wait:                                       # 等你回应: 常亮大问号(闪的是边框)
-        draw.append(label(QX, QY, "?", 0xFF6400, FONTQ))
+        draw.append(label(QX, QY, "?", QCOL, FONTQ))
     elif not busy:                                 # 闲: 右上角的 Z 斜着往右上飘
         zp = (phase // 4) % 2
         draw.append(label(ZX + zp, 1 - zp, "Z", 0x5B626D, ZZZ))
