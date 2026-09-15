@@ -6,7 +6,7 @@
 - 活跃会话 = ~/.claude/projects/*/*.jsonl 中近 ACTIVE 秒内有更新的(每份=一个会话)。
 - 正在执行(busy) = 任一 claude 进程 CPU 超阈值(工具等待期间 transcript 不动, 故用 CPU 补)。
 - 子 agent = 各会话 <session>/subagents/ 下近 SUB 秒内活动的 transcript 数。
-画面: 左侧 Claude 星芒图标常驻; 忙=星芒转动, 等你回应=闪问号, 闲=飘 Z; 右侧会话数, 底部黄点=子 agent 数。
+画面: 左侧 Claude Code 小人常驻; 忙=走路, 等你回应=闪问号, 闲=闭眼飘 Z; 右侧会话数, 底部黄点=子 agent 数。
 
 单独运行: python3 plugins/agent/plugin.py [--device IP] [--dry-run] [--once]
 """
@@ -29,27 +29,33 @@ TICK = 0.4                          # 推帧/动画节奏
 POLL_EVERY = 5                      # 每 5 帧(2s)重新扫描一次状态
 WHITE, GRAY, SUBC = "#E9EBEE", "#5B626D", "#FFD000"
 AMBER = "#FF6400"                   # 等你回应(权限请求/通知)
-CLAUDE = "#D97757"                  # Claude 品牌橙: 正在工作
+CLAUDE = "#D97757"                  # Claude 品牌橙: 小人常驻此色, 不用颜色区分状态
 
-# Claude 星芒图标 13x13: 8 条射线, 用 6 条 dl 画完(比 db 位图省很多字节)。
-#   ......#......      正向射线 = 一竖一横贯穿, 长度 c
-#   ...#..#..#...      斜向射线 = 4 段短对角, 长度 d
-#   #############
-# 状态不靠颜色区分, 靠形态: 闲=静止+"Z"; 忙=射线长度循环(星芒转动); 等待=静止+闪烁"?"。
-IX, IY = 0, 1                       # 图标在 52x16 上的左上角
-CX = CY = 6                         # 图标内的中心
-BUSY_CYCLE = [(6, 3), (5, 4), (4, 5), (5, 4)]    # 忙: 正向/斜向长度此消彼长 = 转动感
-STILL = (6, 3)                      # 闲/等待: 静止形态
-BADGEX, COUNTX = 15, 30             # "Z"/"?" 与会话数的 x
-SCANX0 = 30                         # 底部子agent 黄点起点
+# Claude Code 小人 16x10(按官方像素图量的格): 身体 + 两条竖眼缝 + 横贯手臂 + 四条腿。
+#   ..############..
+#   ..##.######.##..   <- 眼(挖空成背景色)
+#   ################   <- 手臂横贯全宽
+#   ..############..
+#   ...#.#....#.#...   <- 四条腿
+# 状态不靠颜色, 靠形态: 闲=闭眼+飘 Z; 忙=四条腿交替长短(走路); 等待=睁眼+闪问号。
+SX, SY = 0, 3                       # 小人在 52x16 上的左上角
+BODY, ARMS = (2, 0, 12, 8), (0, 4, 16, 2)
+EYES, LEGS = (4, 11), (3, 5, 10, 12)
+BG = "#000000"                      # 挖眼用: 设备底色
+BADGEX, COUNTX, DOTX = 19, 33, 19   # "Z"/"?" / 会话数 / 子agent 黄点 的 x
 
 
-def burst(c, d, color):
-    """8 射线星芒的 draw 指令。c=正向长度, d=斜向长度(格数)。"""
-    seg = [(CX, CY - c, CX, CY + c), (CX - c, CY, CX + c, CY),
-           (CX - d, CY - d, CX - 1, CY - 1), (CX + d, CY - d, CX + 1, CY - 1),
-           (CX - d, CY + d, CX - 1, CY + 1), (CX + d, CY + d, CX + 1, CY + 1)]
-    return [{"dl": [x0 + IX, y0 + IY, x1 + IX, y1 + IY, color]} for x0, y0, x1, y1 in seg]
+def little(color, walk=None, sleep=False):
+    """小人的 draw 指令。walk=0/1 时两组腿交替长短(走路动画); sleep 时眼睛闭成一横。"""
+    d = [{"df": [BODY[0] + SX, BODY[1] + SY, BODY[2], BODY[3], color]},
+         {"df": [ARMS[0] + SX, ARMS[1] + SY, ARMS[2], ARMS[3], color]}]
+    for i, x in enumerate(LEGS):
+        h = 2 if walk is None or i % 2 == walk else 1
+        d.append({"df": [x + SX, 8 + SY, 1, h, color]})
+    for x in EYES:
+        d.append({"df": [x - 1 + SX, 3 + SY, 3, 1, BG]} if sleep     # 闭眼: 一横(3 宽, 与睁眼同心)
+                 else {"df": [x + SX, 2 + SY, 1, 2, BG]})            # 睁眼: 竖缝
+    return d
 
 
 def scan_hooks():
@@ -93,9 +99,8 @@ def scan():
 
 
 def render(sessions, subs, busy, wait, phase, interval):
-    """图标常驻; 三态靠形态: 忙=星芒转动, 等待=问号闪烁, 闲=飘 Z。"""
-    c, d = BUSY_CYCLE[phase % len(BUSY_CYCLE)] if busy else STILL
-    draw = burst(c, d, CLAUDE)
+    """小人常驻; 三态靠形态: 忙=走路, 等待=问号闪烁, 闲=闭眼飘 Z。"""
+    draw = little(CLAUDE, walk=phase % 2 if busy else None, sleep=not busy and not wait)
     text = []
     if sessions:
         text.append({"content": str(sessions), "fontHeight": 10, "x": COUNTX, "y": 3, "color": WHITE})
@@ -105,8 +110,8 @@ def render(sessions, subs, busy, wait, phase, interval):
     elif not busy:                                 # 闲: Z 慢慢上下飘
         text.append({"content": "Z", "fontHeight": 10, "x": BADGEX,
                      "y": 2 if (phase // 4) % 2 else 4, "color": GRAY})
-    for k in range(min(subs, 7)):                  # 底部子agent 黄点
-        draw.append({"df": [SCANX0 + k * 3, 14, 2, 2, SUBC]})
+    for k in range(min(subs, 4)):                  # 底部子agent 黄点
+        draw.append({"df": [DOTX + k * 3, 14, 2, 2, SUBC]})
     return {"duration": interval, "text": text, "draw": draw}
 
 
