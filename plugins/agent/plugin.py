@@ -48,7 +48,10 @@ ZX = 12                             # Z 的 x: 头部右上角(身体右缘 x13)
 BG = "#000000"                      # 挖眼用: 设备底色
 # 锄头两帧: (手柄起点x,y, 终点x,y, 锄刃x,y) — 扛起 / 落地, 与走路同步 = 一边走一边锄
 HOE = [((16, 4), (19, 1), (19, 0)), ((16, 5), (19, 8), (19, 8))]
-BADGEX, DOTX = 16, 19               # "Z"/"?" 占 x16..21(一个字 6px), 在小人与用量区之间
+DOTX = 19                           # 子agent 黄点的 x
+# wait 是唯一需要你动手的状态, 所以给它三重信号: 大问号 + 闪烁边框 + 瞪大眼。
+QX, QY = 17, 3                      # 5x9 大问号的位置(小人 x0..15 与标签 x23 之间)
+FONTQ = {"?": (".###.", "#...#", "#...#", "....#", "...#.", "..#..", "..#..", ".....", "..#..")}
 # 用量区 x23..50: 左边 3x5 迷你字标签, 右边进度条。上排=5 小时窗, 下排=7 天窗。
 # 设备字体 fontHeight 10 太高, 上下两排会互相压, 所以标签自己画。
 LABELX, BARX, BARW = 23, 32, 19
@@ -61,18 +64,25 @@ FONT35 = {"5": ("###", "#..", "###", "..#", "###"),
 
 
 def label(x, y, text, color, font=FONT35):
-    """迷你字标签, 一条 db 位图指令(比逐段 df 省字节)。color 为 0xRRGGBB 整数。"""
+    """迷你字标签, 一条 db 位图指令(比逐段 df 省字节)。字宽高由字模自己决定。"""
     gs = [font[c] for c in text]
+    gw, gh = len(gs[0][0]), len(gs[0])
     px = []
-    for r in range(len(gs[0])):
+    for r in range(gh):
         for i, g in enumerate(gs):
-            px += [color if g[r][c] == "#" else 0 for c in range(3)]
+            px += [color if g[r][c] == "#" else 0 for c in range(gw)]
             if i < len(gs) - 1:
                 px.append(0)                        # 字间 1px 空隙
-    return {"db": [x, y, len(text) * 4 - 1, len(gs[0]), px]}
+    return {"db": [x, y, len(text) * (gw + 1) - 1, gh, px]}
 
 
-def little(color, walk=None, sleep=False):
+def border(color):
+    """整屏 1px 边框: 余光也看得见的闪烁提醒。画在最前, 小人会盖在它上面。"""
+    return [{"df": [0, 0, 52, 1, color]}, {"df": [0, 15, 52, 1, color]},
+            {"df": [0, 0, 1, 16, color]}, {"df": [51, 0, 1, 16, color]}]
+
+
+def little(color, walk=None, sleep=False, stare=False):
     """小人的 draw 指令。三态共用同一尺寸; walk=0/1: 腿交替长短 + 扛锄头挥动; sleep: 闭眼。"""
     d = [{"df": [BODY[0] + SX, BODY[1] + SY, BODY[2], BODY[3], color]},
          {"df": [ARMS[0] + SX, ARMS[1] + SY, ARMS[2], ARMS[3], color]}]
@@ -84,8 +94,12 @@ def little(color, walk=None, sleep=False):
         d.append({"dl": [hx + SX, hy + SY, tx + SX, ty + SY, HOECOL]})     # 手柄
         d.append({"df": [bx + SX, by + SY, 2, 2, HOECOL]})                 # 锄刃
     for x in EYES:
-        d.append({"df": [x - 1 + SX, 3 + SY, 3, 1, BG]} if sleep          # 闭眼: 一横(3 宽, 与睁眼同心)
-                 else {"df": [x + SX, 2 + SY, 1, 2, BG]})                 # 睁眼: 竖缝
+        if sleep:                                                          # 闭眼: 一横(3 宽, 与睁眼同心)
+            d.append({"df": [x - 1 + SX, 3 + SY, 3, 1, BG]})
+        elif stare:                                                        # 瞪大眼: 眼缝加倍宽
+            d.append({"df": [x - (1 if x > 7 else 0) + SX, 2 + SY, 2, 2, BG]})
+        else:
+            d.append({"df": [x + SX, 2 + SY, 1, 2, BG]})
     return d
 
 
@@ -159,22 +173,22 @@ def scan():
 
 
 def render(sessions, subs, busy, wait, phase, interval):
-    """小人常驻(忙=扛锄头走路, 等待=问号, 闲=躺平); 右侧两条用量条: 上 5 小时窗, 下 7 天窗。"""
-    draw = little(CLAUDE, walk=phase % 2 if busy else None, sleep=not busy and not wait)
+    """小人常驻(忙=扛锄头走路, 等待=大问号+闪框, 闲=闭眼飘 Z); 右侧 5H / 7D 用量条。"""
+    draw = border(AMBER) if wait and phase % 2 == 0 else []     # 边框画在最底层
+    draw += little(CLAUDE, walk=phase % 2 if busy else None,
+                   sleep=not busy and not wait, stare=wait)
     lim = read_limits()
     if lim:
         draw += usage_row(ROW5H, "5H", lim[0], C5H, phase)
         draw += usage_row(ROW7D, "7D", lim[1], C7D, phase)
-    text = []
-    if wait:                                       # 等你回应: 问号闪烁
-        if (phase // 2) % 2 == 0:
-            text.append({"content": "?", "fontHeight": 10, "x": BADGEX, "y": 3, "color": AMBER})
+    if wait:                                       # 等你回应: 常亮大问号(闪的是边框)
+        draw.append(label(QX, QY, "?", 0xFF6400, FONTQ))
     elif not busy:                                 # 闲: 右上角的 Z 斜着往右上飘
         zp = (phase // 4) % 2
         draw.append(label(ZX + zp, 1 - zp, "Z", 0x5B626D, ZZZ))
     for k in range(min(subs, 4)):                  # 底部子agent 黄点
         draw.append({"df": [DOTX + k * 3, 14, 2, 2, SUBC]})
-    return {"duration": interval, "text": text, "draw": draw}
+    return {"duration": interval, "text": [], "draw": draw}
 
 
 def frame_for(item, interval):
