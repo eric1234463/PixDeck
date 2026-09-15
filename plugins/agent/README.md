@@ -13,7 +13,24 @@ Claude Code 小人常驻，**状态靠形态而不是颜色**区分；右侧数�
 锄头是一条 `dl` 手柄加一个 2×2 锄刃，两帧坐标在 `HOE`；躺平用 `SLEEP_BODY / SLEEP_ARMS`。
 坐标常量都在 `plugin.py` 顶部。
 
-右侧数字 = 当前活跃会话数（hook 写过状态且 180 秒内有更新的会话）；底部黄点 = 并行 subagent 数，最多画 4 个。
+右侧两条用量条（`x22..49`，各 2px 高）：**上 = 5 小时窗，下 = 7 天窗**。
+暗槽是总量，亮段是已用；任一条到 90% 以上会闪烁。底部黄点 = 并行 subagent 数，最多画 4 个。
+
+### 用量数据从哪来
+
+只有 statusline 的 stdin JSON 带 `rate_limits`（`policy-limits.json`、`stats-cache.json`、
+transcript 都没有）。所以在 `~/.claude/statusline-command.sh` 开头加一段，把它原子写到
+`~/.pixdeck/limits.json`：
+
+```bash
+mkdir -p ~/.pixdeck 2>/dev/null && printf '%s' "$input" \
+  | jq -c '{five_hour: .rate_limits.five_hour, seven_day: .rate_limits.seven_day, ts: now}' \
+  > ~/.pixdeck/limits.json.tmp 2>/dev/null && mv ~/.pixdeck/limits.json.tmp ~/.pixdeck/limits.json
+```
+
+statusline 只在有 Claude Code 会话在渲染时才跑，所以没开 Claude Code 时这个文件不更新；
+插件按 `resets_at` 判断窗口是否已经滚过，滚过就当 0%，因此陈旧文件也不会显示错的高用量。
+读不到文件就不画这两条，小人照常显示。
 
 ## 数据来源
 

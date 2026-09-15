@@ -6,7 +6,7 @@
 - 活跃会话 = ~/.claude/projects/*/*.jsonl 中近 ACTIVE 秒内有更新的(每份=一个会话)。
 - 正在执行(busy) = 任一 claude 进程 CPU 超阈值(工具等待期间 transcript 不动, 故用 CPU 补)。
 - 子 agent = 各会话 <session>/subagents/ 下近 SUB 秒内活动的 transcript 数。
-画面: 左侧 Claude Code 小人常驻; 忙=扛锄头走路, 等你回应=闪问号, 闲=躺平睡觉飘 Z; 右侧会话数, 底部黄点=子 agent 数。
+画面: 左侧 Claude Code 小人常驻; 忙=扛锄头走路, 等你回应=闪问号, 闲=躺平睡觉飘 Z; 右侧两条用量条(5h/7d), 底部黄点=子 agent 数。
 
 单独运行: python3 plugins/agent/plugin.py [--device IP] [--dry-run] [--once]
 """
@@ -23,11 +23,12 @@ ITEMS = ["agent"]
 
 PROJ = os.path.expanduser("~/.claude/projects")
 HOOKDIR = os.path.expanduser("~/.pixdeck/agent")   # hook.py 写的会话状态; 目录不存在=未装 hook
+LIMITS = os.path.expanduser("~/.pixdeck/limits.json")   # statusline 写的 5h/7d 用量; 见 README
 ACTIVE, SUB = 180, 40               # 活跃会话窗 / 子agent 窗(秒)
 CPU_BUSY = 8.0                      # claude 进程 CPU 超此值视为"正在生成"
 TICK = 0.4                          # 推帧/动画节奏
 POLL_EVERY = 5                      # 每 5 帧(2s)重新扫描一次状态
-WHITE, GRAY, SUBC = "#E9EBEE", "#5B626D", "#FFD000"
+WHITE, GRAY, SUBC, DIM = "#E9EBEE", "#5B626D", "#FFD000", "#2A3038"
 AMBER = "#FF6400"                   # 等你回应(权限请求/通知)
 CLAUDE = "#D97757"                  # Claude 品牌橙: 小人常驻此色, 不用颜色区分状态
 
@@ -45,7 +46,9 @@ SLEEP_BODY, SLEEP_ARMS = (2, 5, 12, 5), (0, 7, 16, 2)   # 睡: 身体压扁并�
 BG = "#000000"                      # 挖眼用: 设备底色
 # 锄头两帧: (手柄起点x,y, 终点x,y, 锄刃x,y) — 扛起 / 落地, 与走路同步 = 一边走一边锄
 HOE = [((16, 4), (19, 1), (19, 0)), ((16, 5), (19, 8), (19, 8))]
-BADGEX, COUNTX, DOTX = 19, 33, 19   # "Z"/"?" / 会话数 / 子agent 黄点 的 x
+BADGEX, DOTX = 19, 19               # "Z"/"?" / 子agent 黄点 的 x
+BARX, BARW = 22, 28                 # 用量条: 上=5 小时窗, 下=7 天窗
+BAR5H_Y, BAR7D_Y = 5, 10
 
 
 def little(color, walk=None, sleep=False):
@@ -65,6 +68,34 @@ def little(color, walk=None, sleep=False):
         ey = body[1] + 1 if sleep else 2        # 睡: 眼睛落在身体上半, 别打到手臂那条横杠
         d.append({"df": [x - 1 + SX, ey + SY, 3, 1, BG]} if sleep         # 闭眼: 一横(3 宽, 与睁眼同心)
                  else {"df": [x + SX, 2 + SY, 1, 2, BG]})                 # 睁眼: 竖缝
+    return d
+
+
+def _pct(d, now):
+    """一个窗口的已用百分比; 窗口已经滚过(now >= resets_at)则归零。"""
+    if not d:
+        return None
+    return 0 if now >= (d.get("resets_at") or 0) else d.get("used_percentage")
+
+
+def read_limits():
+    """读 statusline 写的用量 -> (5h%, 7d%); 没装/读不到返回 None。"""
+    try:
+        with open(LIMITS) as f:
+            d = json.load(f)
+    except Exception:
+        return None
+    now = time.time()
+    a, b = _pct(d.get("five_hour"), now), _pct(d.get("seven_day"), now)
+    return None if a is None or b is None else (a, b)
+
+
+def bar(y, pct, phase):
+    """一条用量条: 暗底槽 + 亮填充; 用满 90% 以上闪烁提醒。"""
+    d = [{"df": [BARX, y, BARW, 2, DIM]}]
+    n = round(pct / 100 * BARW)
+    if n and (pct < 90 or (phase // 2) % 2 == 0):
+        d.append({"df": [BARX, y, max(1, n), 2, WHITE]})
     return d
 
 
@@ -109,11 +140,12 @@ def scan():
 
 
 def render(sessions, subs, busy, wait, phase, interval):
-    """小人常驻; 三态靠形态: 忙=走路, 等待=问号闪烁, 闲=闭眼飘 Z。"""
+    """小人常驻(忙=扛锄头走路, 等待=问号, 闲=躺平); 右侧两条用量条: 上 5 小时窗, 下 7 天窗。"""
     draw = little(CLAUDE, walk=phase % 2 if busy else None, sleep=not busy and not wait)
+    lim = read_limits()
+    if lim:
+        draw += bar(BAR5H_Y, lim[0], phase) + bar(BAR7D_Y, lim[1], phase)
     text = []
-    if sessions:
-        text.append({"content": str(sessions), "fontHeight": 10, "x": COUNTX, "y": 3, "color": WHITE})
     if wait:                                       # 等你回应: 问号闪烁
         if (phase // 2) % 2 == 0:
             text.append({"content": "?", "fontHeight": 10, "x": BADGEX, "y": 3, "color": AMBER})
