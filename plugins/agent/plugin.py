@@ -6,7 +6,7 @@
 - 活跃会话 = ~/.claude/projects/*/*.jsonl 中近 ACTIVE 秒内有更新的(每份=一个会话)。
 - 正在执行(busy) = 任一 claude 进程 CPU 超阈值(工具等待期间 transcript 不动, 故用 CPU 补)。
 - 子 agent = 各会话 <session>/subagents/ 下近 SUB 秒内活动的 transcript 数。
-画面: 左侧大数字=会话数(忙绿/等橙/闲白); 右侧扫描灯(忙时脉动、等待时闪烁); 底部黄点=子 agent 数。
+画面: 左侧 Claude 星芒图标(闲灰/忙橙/等待黄), 右侧会话数 + 状态区, 底部黄点=子 agent 数。
 
 单独运行: python3 plugins/agent/plugin.py [--device IP] [--dry-run] [--once]
 """
@@ -27,9 +27,25 @@ ACTIVE, SUB = 180, 40               # 活跃会话窗 / 子agent 窗(秒)
 CPU_BUSY = 8.0                      # claude 进程 CPU 超此值视为"正在生成"
 TICK = 0.4                          # 推帧/动画节奏
 POLL_EVERY = 5                      # 每 5 帧(2s)重新扫描一次状态
-SCANX0, SCANX1 = 22, 49            # 扫描灯轨道
-GREEN, WHITE, DIM, GRAY, SUBC = "#3EE08A", "#E9EBEE", "#2A3038", "#5B626D", "#FFD000"
+WHITE, DIM, GRAY, SUBC = "#E9EBEE", "#2A3038", "#5B626D", "#FFD000"
 AMBER = "#FF6400"                   # 等你回应(权限请求/通知)
+CLAUDE = "#D97757"                  # Claude 品牌橙: 正在工作
+
+# Claude 星芒图标 13x13: 8 条射线(正向长 6, 斜向长 3)。用 6 条 dl 画完, 比 db 位图省很多字节。
+# 形状(x,y 均以图标左上角为原点):
+#   ......#......      正向射线 = 一竖一横贯穿
+#   ...#..#..#...      斜向射线 = 4 段短对角
+#   .....###.....
+#   #############
+ICON = [(6, 0, 6, 12), (0, 6, 12, 6),                      # 竖 / 横
+        (3, 3, 5, 5), (9, 3, 7, 5), (3, 9, 5, 7), (9, 9, 7, 7)]   # 左上/右上/左下/右下
+IX, IY = 0, 1                       # 图标在 52x16 上的左上角
+SCANX0, SCANX1 = 23, 49             # 状态区(图标与数字右边)
+
+
+def icon(color):
+    """Claude 星芒的 draw 指令列表。"""
+    return [{"dl": [x0 + IX, y0 + IY, x1 + IX, y1 + IY, color]} for x0, y0, x1, y1 in ICON]
 
 
 def _busy():
@@ -89,26 +105,23 @@ def scan():
 
 
 def render(sessions, subs, busy, wait, phase, interval):
-    if sessions == 0:
-        return {"duration": interval, "text": [
-            {"content": "IDLE", "fontHeight": 10, "x": -1000, "y": 3,
-             "align": "center", "rect": [0, 0, 52, 16], "color": GRAY}]}
-    color = AMBER if wait else (GREEN if busy else WHITE)
-    text = [{"content": str(sessions), "fontHeight": 10, "x": 3, "y": 3, "color": color}]
-    draw = []
+    """三态: 等你回应(黄+问号闪烁) > 正在工作(橙+扫描灯) > 闲(灰图标)。"""
+    color = AMBER if wait else (CLAUDE if busy else (WHITE if sessions else GRAY))
+    draw = icon(color)
+    text = []
+    if sessions:
+        text.append({"content": str(sessions), "fontHeight": 10, "x": 15, "y": 3, "color": color})
     span = SCANX1 - SCANX0
-    if wait:                                       # 等你回应: 整条轨道闪烁
-        draw.append({"df": [SCANX0, 7, span + 2, 2, AMBER if (phase // 2) % 2 == 0 else DIM]})
-    elif busy:                                       # 扫描灯来回扫
+    if wait:                                       # 等你回应: 问号闪烁
+        if (phase // 2) % 2 == 0:
+            text.append({"content": "?", "fontHeight": 10, "x": 28, "y": 3, "color": AMBER})
+    elif busy:                                     # 正在工作: 扫描灯来回扫
+        draw.append({"dl": [SCANX0, 8, SCANX1 + 2, 8, DIM]})
         p = phase % (2 * span)
         x = SCANX0 + (p if p <= span else 2 * span - p)
-        draw.append({"df": [x, 7, 3, 2, GREEN]})
-        draw.append({"dl": [SCANX0, 8, SCANX1 + 2, 8, DIM]})
-    else:                                          # 闲: 轨道上一颗暗点
-        draw.append({"dl": [SCANX0, 8, SCANX1 + 2, 8, DIM]})
-        draw.append({"df": [(SCANX0 + SCANX1) // 2, 7, 2, 2, GRAY]})
-    for k in range(min(subs, 10)):                 # 底部子agent 黄点
-        draw.append({"df": [SCANX0 + k * 3, 13, 2, 2, SUBC]})
+        draw.append({"df": [x, 7, 3, 2, CLAUDE]})
+    for k in range(min(subs, 8)):                  # 底部子agent 黄点
+        draw.append({"df": [SCANX0 + k * 3, 14, 2, 2, SUBC]})
     return {"duration": interval, "text": text, "draw": draw}
 
 
