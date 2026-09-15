@@ -44,7 +44,7 @@ SX, SY = 0, 4                       # 小人在 52x16 上的左上角; 留出 y0
 BODY, ARMS = (2, 0, 12, 8), (0, 4, 16, 2)
 EYES, LEGS = (4, 11), (3, 5, 10, 12)
 ZZZ = {"Z": ("###", ".#.", "###")}  # 头顶 3x3 的 Z; 三态小人尺寸一致, 睡觉只闭眼 + 飘 Z
-ZX = 6                              # Z 的 x: 对准身体中线
+ZX = 12                             # Z 的 x: 头部右上角(身体右缘 x13), 斜着往右上飘
 BG = "#000000"                      # 挖眼用: 设备底色
 # 锄头两帧: (手柄起点x,y, 终点x,y, 锄刃x,y) — 扛起 / 落地, 与走路同步 = 一边走一边锄
 HOE = [((16, 4), (19, 1), (19, 0)), ((16, 5), (19, 8), (19, 8))]
@@ -169,8 +169,9 @@ def render(sessions, subs, busy, wait, phase, interval):
     if wait:                                       # 等你回应: 问号闪烁
         if (phase // 2) % 2 == 0:
             text.append({"content": "?", "fontHeight": 10, "x": BADGEX, "y": 3, "color": AMBER})
-    elif not busy:                                 # 闲: 头顶的 Z 慢慢上下飘
-        draw.append(label(ZX, (phase // 4) % 2, "Z", 0x5B626D, ZZZ))
+    elif not busy:                                 # 闲: 右上角的 Z 斜着往右上飘
+        zp = (phase // 4) % 2
+        draw.append(label(ZX + zp, 1 - zp, "Z", 0x5B626D, ZZZ))
     for k in range(min(subs, 4)):                  # 底部子agent 黄点
         draw.append({"df": [DOTX + k * 3, 14, 2, 2, SUBC]})
     return {"duration": interval, "text": text, "draw": draw}
