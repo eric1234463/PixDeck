@@ -31,6 +31,7 @@ POLL_EVERY = 5                      # 每 5 帧(2s)重新扫描一次状态
 SUBC, DIM = "#FFD000", "#2A3038"
 AMBER = "#FF6400"                   # 等你回应(权限请求/通知)
 CLAUDE = "#D97757"                  # Claude 品牌橙: 小人常驻此色, 不用颜色区分状态
+HOECOL = "#C9D4E0"                  # 锄头: 钢灰蓝, 与橙色身体拉开, 一眼看出手上有家伙
 
 # Claude Code 小人 16x10(按官方像素图量的格): 身体 + 两条竖眼缝 + 横贯手臂 + 四条腿。
 #   ..############..
@@ -78,10 +79,10 @@ def little(color, walk=None, sleep=False):
     for i, x in enumerate(LEGS):
         h = 2 if walk is None or i % 2 == walk else 1
         d.append({"df": [x + SX, 8 + SY, 1, h, color]})
-    if walk is not None:                                 # 手上的锄头
+    if walk is not None:                                 # 手上的锄头(自己一个颜色)
         (hx, hy), (tx, ty), (bx, by) = HOE[walk]
-        d.append({"dl": [hx + SX, hy + SY, tx + SX, ty + SY, color]})      # 手柄
-        d.append({"df": [bx + SX, by + SY, 2, 2, color]})                  # 锄刃
+        d.append({"dl": [hx + SX, hy + SY, tx + SX, ty + SY, HOECOL]})     # 手柄
+        d.append({"df": [bx + SX, by + SY, 2, 2, HOECOL]})                 # 锄刃
     for x in EYES:
         d.append({"df": [x - 1 + SX, 3 + SY, 3, 1, BG]} if sleep          # 闭眼: 一横(3 宽, 与睁眼同心)
                  else {"df": [x + SX, 2 + SY, 1, 2, BG]})                 # 睁眼: 竖缝
