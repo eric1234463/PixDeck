@@ -71,6 +71,7 @@ def apply_transport(t):
                              broker_port=int(port) if port.isdigit() else 1883,
                              prefix=t.get("prefix", ""), username=t.get("mqtt_user") or None,
                              password=t.get("mqtt_pass") or None, retain=bool(t.get("retain")))
+    ensure_status_watch(t)                  # mqtt: 订阅设备 LWT, 重启时停插件
 
 
 def valid_device(s):
@@ -394,6 +395,86 @@ def device_status(device):
     }
 
 
+# ---- 设备重启看门狗 ----
+# 组件在设备上"曾出现过又消失" = 设备重启(或用户手删)。此时停掉插件, 画面留在设备内建 app,
+# 等用户手动再开; 否则插件下一帧会把 DIY 组件重建, 画面立刻被抢回去。
+# 只判"曾见过"的组件: 插件刚开还没推出第一帧(或 frame_for 暂时无数据)时不会被误停。
+WATCHDOG_PERIOD = 5                     # 轮询 customList 的间隔秒数
+WATCHDOG_MISS = 2                       # 连续缺席几次才停(抗 wifi 抖动/单次请求失败)
+_seen_on_device = set()                 # 确认过在设备上出现的组件名
+_miss = {}                              # app -> 连续缺席次数
+
+
+def stop_for_restart(reason, apps=None):
+    """设备重启后停掉运行中的插件: 不再推帧, 画面留在设备内建 app, 等用户手动再开。"""
+    for app in (apps if apps is not None else list(RUNNERS)):
+        r = RUNNERS[app]
+        _seen_on_device.discard(app)
+        _miss.pop(app, None)
+        if r.running():
+            r._emit(f"{time.strftime('%H:%M:%S')}  {reason}, 停止插件")
+            r.stop_run()                    # 不传 device: 组件已不在设备上, 无需再推删除
+
+
+def watchdog_tick(device):
+    """对比设备组件列表与运行中的插件, 停掉组件已消失的那些。"""
+    cl = device_get(device, "/api/customList")
+    if cl is None:                      # 设备不可达: 不判(离线 != 重启)
+        return
+    names = set(cl.get("apps", []))
+    for app, r in RUNNERS.items():
+        if not r.running():
+            _seen_on_device.discard(app)
+            _miss.pop(app, None)
+        elif app in names:
+            _seen_on_device.add(app)
+            _miss[app] = 0
+        elif app in _seen_on_device:
+            _miss[app] = _miss.get(app, 0) + 1
+            if _miss[app] >= WATCHDOG_MISS:
+                stop_for_restart("设备重启: 组件已从设备消失", [app])
+
+
+def watchdog_loop():
+    while True:
+        time.sleep(WATCHDOG_PERIOD)
+        try:
+            if Handler.device:
+                watchdog_tick(Handler.device)
+        except Exception:
+            pass
+
+
+# ---- MQTT 模式的重启检测 ----
+# mqtt 模式下设备 IP 常常连不上(换网段/AP 隔离), 上面的 customList 看门狗形同失效。
+# 设备自己会在 <prefix>/status 上报 online/offline(LWT), 订阅它即可:
+#   retained 的 online = 订阅瞬间 broker 补发的"当前状态", 不是事件, 必须忽略;
+#   非 retained 的 online = 设备刚连上来 = 重启过 -> 停插件。
+_status_sub = None
+
+
+def on_device_status(payload, retained):
+    if retained or payload.strip() != "online":
+        return
+    stop_for_restart("设备重启(mqtt 上线)")
+
+
+def ensure_status_watch(t):
+    """按当前传输配置建立/关闭 <prefix>/status 订阅。传输设置一改就重建。"""
+    global _status_sub
+    if _status_sub:
+        _status_sub.close()
+        _status_sub = None
+    host, _, port = str(t.get("broker", "")).partition(":")
+    prefix = str(t.get("prefix", "")).strip("/")
+    if t.get("transport") != "mqtt" or not host or not prefix:
+        return
+    import pixbar_mqtt
+    _status_sub = pixbar_mqtt.MqttSubscriber(
+        host, int(port) if port.isdigit() else 1883, f"{prefix}/status", on_device_status,
+        username=t.get("mqtt_user") or None, password=t.get("mqtt_pass") or None)
+
+
 class Handler(BaseHTTPRequestHandler):
     device = ""                          # 设备 IP: 启动时从配置载入, 或在界面齿轮里设置
 
@@ -586,6 +667,7 @@ def main():
             RUNNERS[name].start(Handler.device, RUNNERS[name].mod.DEFAULT_INTERVAL)
         else:
             print(f"警告: --start {name} 不是已发现的插件, 已忽略")
+    threading.Thread(target=watchdog_loop, daemon=True).start()   # 设备重启 -> 停掉插件, 不抢回画面
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"pixbar_panel -> http://127.0.0.1:{args.port}  (device {Handler.device or '未设置 — 在网页里填'})")
     print(f"plugins: {', '.join(RUNNERS) or '(none)'}")

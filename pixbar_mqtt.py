@@ -3,7 +3,7 @@
 
 把画面帧 JSON 以 PUBLISH(QoS 0) 发到 broker 的 <prefix>/custom/<app> topic。
 编解码思路借鉴本地探查工具 mqtt_sniff.py, 但本文件自包含、不 import 它(后者不入库)。
-只发布, 不订阅。MqttPublisher 见文件后半部分。
+MqttPublisher 发布帧; MqttSubscriber 订阅单个 topic(设备在线状态), 各用一条连接。
 """
 import socket, threading
 
@@ -49,6 +49,12 @@ def encode_publish(topic, payload, qos=0, retain=False):
     header = 0x30 | (1 if retain else 0) | ((qos & 3) << 1)
     body = _str(topic) + payload
     return bytes([header]) + _remlen(len(body)) + body
+
+
+def encode_subscribe(topic, packet_id=1, qos=0):
+    """SUBSCRIBE 包(单个 topic)。"""
+    body = int(packet_id).to_bytes(2, "big") + _str(topic) + bytes([qos & 3])
+    return b"\x82" + _remlen(len(body)) + body
 
 
 def _read_remlen(data, i):
@@ -139,3 +145,85 @@ class MqttPublisher:
     def close(self):
         with self._lock:
             self._close_locked()
+
+
+class MqttSubscriber:
+    """订阅单个 topic 的后台读取端: 每条消息回调 on_message(payload_str, retained)。
+
+    retained 透传给调用方: broker 在订阅瞬间补发的保留消息是"当前状态", 不是新事件。
+    keepalive=0 与发布端一致(告知 broker 不做保活, 故无需发 PINGREQ)。
+    断线 RETRY 秒后重连重订; close() 后不再重连。
+    """
+    RETRY = 5
+
+    def __init__(self, host, port, topic, on_message, client_id="pixdeck-sub",
+                 username=None, password=None):
+        self.host = host
+        self.port = int(port or 1883)
+        self.topic = topic
+        self.on_message = on_message
+        self.client_id = client_id
+        self.username = username or None
+        self.password = password or None
+        self._sock = None
+        self._stop = threading.Event()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _read_packet(self):
+        """读一个完整 MQTT 包 -> (首字节, body bytes); 连接断开返回 None。"""
+        b0 = _recv_exact(self._sock, 1)
+        if not b0:
+            return None
+        n, mult = 0, 1
+        while True:
+            b = _recv_exact(self._sock, 1)
+            if not b:
+                return None
+            n += (b[0] & 0x7F) * mult
+            if not (b[0] & 0x80):
+                break
+            mult *= 128
+        body = _recv_exact(self._sock, n) if n else b""
+        if body is None:
+            return None
+        return b0[0], body
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                s = socket.create_connection((self.host, self.port), timeout=5)
+                s.sendall(encode_connect(self.client_id, self.username, self.password, 0))
+                ack = _recv_exact(s, 4)
+                if not ack or (ack[0] >> 4) != 2:
+                    raise OSError("no CONNACK")
+                s.sendall(encode_subscribe(self.topic))
+                s.settimeout(None)                      # 订阅后长期阻塞等消息
+                self._sock = s
+                while not self._stop.is_set():
+                    pkt = self._read_packet()
+                    if pkt is None:
+                        break
+                    b0, body = pkt
+                    if b0 >> 4 != 3:                    # 只关心 PUBLISH; SUBACK 等忽略
+                        continue
+                    _t, payload, retained = decode_publish(bytes([b0]) + _remlen(len(body)) + body)
+                    try:
+                        self.on_message(payload.decode("utf-8", "replace"), retained)
+                    except Exception:
+                        pass                            # 回调出错不能弄断订阅
+            except OSError:
+                pass
+            self._close()
+            self._stop.wait(self.RETRY)
+
+    def _close(self):
+        if self._sock:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    def close(self):
+        self._stop.set()
+        self._close()

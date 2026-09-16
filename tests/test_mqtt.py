@@ -1,4 +1,4 @@
-"""MQTT 发布端单元测试(纯标准库 unittest)。
+"""MQTT 传输 + 设备重启检测的单元测试(纯标准库 unittest)。
 
 编码/解码对拍: encode_publish 出的字节能被自带的 decode_publish 解回同样的 topic/payload。
 不依赖 mqtt_sniff.py(它是 gitignore 的本地工具)。
@@ -174,3 +174,78 @@ class TestPanelTransportConfig(unittest.TestCase):
         self.assertEqual(vb("169.254.169.254"), "")               # 元数据/链路本地挡住
         self.assertEqual(self.panel.valid_device("127.0.0.1"), "")  # 设备仍禁环回(不受影响)
 
+
+class TestSubscribeCodec(unittest.TestCase):
+    def test_subscribe_packet_shape(self):
+        pkt = mq.encode_subscribe("ulanzi_a2fa/status")
+        self.assertEqual(pkt[0], 0x82)                      # SUBSCRIBE type + QoS1 flags
+        self.assertEqual(pkt[2:4], b"\x00\x01")             # packet id
+        self.assertIn(b"ulanzi_a2fa/status", pkt)
+        self.assertEqual(pkt[-1], 0)                        # requested QoS 0
+
+
+class TestRestartDetection(unittest.TestCase):
+    """设备重启检测的判定规则(不碰网络; 线程与 socket 由 test_mqtt 的真 broker 部分覆盖)。"""
+    def setUp(self):
+        self.panel = _load_panel()
+        self.app = next(iter(self.panel.RUNNERS))
+        self.r = self.panel.RUNNERS[self.app]
+        self.r.active = True                    # 伪装成运行中, 不起真线程
+        self.r.stop = self.r.thread = None
+        self.stopped = []
+        self.panel.stop_for_restart = lambda reason, apps=None: self.stopped.append((reason, apps))
+
+    def test_retained_online_is_state_not_event(self):
+        self.panel.on_device_status("online", True)         # 订阅瞬间 broker 补发的现状
+        self.assertEqual(self.stopped, [])
+
+    def test_offline_does_not_stop(self):
+        self.panel.on_device_status("offline", False)       # 掉线 != 重启; 回来才算
+        self.assertEqual(self.stopped, [])
+
+    def test_live_online_stops_plugins(self):
+        self.panel.on_device_status("online", False)        # 设备刚连上来 = 重启过
+        self.assertEqual(len(self.stopped), 1)
+
+    def test_watchdog_needs_seen_then_missing_twice(self):
+        p = self.panel
+        p.device_get = lambda *a, **k: {"apps": []}
+        p.watchdog_tick("10.0.0.1"); p.watchdog_tick("10.0.0.1")
+        self.assertEqual(self.stopped, [])                  # 从未出现过的组件不判(第一帧未推出)
+        p.device_get = lambda *a, **k: {"apps": [self.app]}
+        p.watchdog_tick("10.0.0.1")
+        p.device_get = lambda *a, **k: {"apps": []}
+        p.watchdog_tick("10.0.0.1")
+        self.assertEqual(self.stopped, [])                  # 单次缺席 = wifi 抖动
+        p.device_get = lambda *a, **k: None
+        p.watchdog_tick("10.0.0.1")
+        self.assertEqual(self.stopped, [])                  # 设备不可达: 不判, 也不累加
+        self.assertEqual(p._miss[self.app], 1)
+        p.device_get = lambda *a, **k: {"apps": []}
+        p.watchdog_tick("10.0.0.1")
+        self.assertEqual(len(self.stopped), 1)              # 连续两次缺席 -> 停
+        self.assertEqual(self.stopped[0][1], [self.app])
+
+    def test_stop_for_restart_clears_state_and_logs(self):
+        p2 = _load_panel()                                  # 干净模块: 用真的 stop_for_restart
+        app = self.app
+        r = p2.RUNNERS[app]
+        r.active = True
+        r.stop = r.thread = None
+        p2._seen_on_device.add(app)
+        p2._miss[app] = 1
+        p2.stop_for_restart("设备重启(mqtt 上线)")
+        self.assertFalse(r.running())
+        self.assertNotIn(app, p2._seen_on_device)
+        self.assertNotIn(app, p2._miss)
+        self.assertIn("设备重启(mqtt 上线)", r.log[-2])
+
+
+class TestStatusWatchLifecycle(unittest.TestCase):
+    def test_http_mode_and_missing_prefix_start_no_subscription(self):
+        p = _load_panel()
+        for t in ({"transport": "http", "broker": "10.0.0.2:1883", "prefix": "x"},
+                  {"transport": "mqtt", "broker": "10.0.0.2:1883", "prefix": ""},
+                  {"transport": "mqtt", "broker": "", "prefix": "x"}):
+            p.ensure_status_watch(t)
+            self.assertIsNone(p._status_sub, t)
