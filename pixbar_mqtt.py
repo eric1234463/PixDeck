@@ -28,6 +28,9 @@ def _str(s):
 def encode_connect(client_id, username=None, password=None, keepalive=0):
     """CONNECT 包。keepalive=0 表示不启用 broker 保活(我们靠出错重连)。"""
     flags = 0x02                                  # clean session
+    if username is None:
+        password = None                           # MQTT 3.1.1: 无 username 不得带 password,
+                                                  # 否则 broker 视为协议错误直接断线(表现为 no CONNACK)
     if username is not None:
         flags |= 0x80
     if password is not None:

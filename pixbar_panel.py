@@ -8,7 +8,7 @@
   python3 pixbar_panel.py                 # 启动后浏览器开 http://127.0.0.1:8000
   python3 pixbar_panel.py --device <IP> --port 8000
 """
-import argparse, ipaddress, json, os, threading, time, urllib.request
+import argparse, ipaddress, json, os, re, socket, subprocess, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 
@@ -441,8 +441,100 @@ def watchdog_loop():
         try:
             if Handler.device:
                 watchdog_tick(Handler.device)
+            maybe_rediscover()          # 地址空/连不上时自愈(换网段、DHCP 续约)
         except Exception:
             pass
+
+
+# ---- 设备地址自动发现 (ARP) ----
+# 换网段/DHCP 续约后设备 IP 会变。不能靠 MQTT 发现: <prefix>/status 之类的信号都要求设备
+# 已经连上正确的 broker —— 而 broker 就跑在本机, 本机 IP 一变设备就连不上, 什么都收不到。
+# ARP 是二层, 不需要设备连 broker、也不需要它先跟我们通信: 先向本网段每个地址发一个 UDP
+# 空包(内核为送出这包必须先 ARP 解析), 再按 MAC 末四位认出设备。前提是同网段且 AP 未开
+# 客户端隔离。SHORTCUT: 只认 MAC 末四位; 同网段撞尾四位的概率极低, 命中后还用 /getBase 复核。
+DISCOVER_COOLDOWN = 60                  # 两次扫描之间的最短间隔(秒)
+DISCOVER_CAP = 1024                     # 单次最多探多少个地址(挡住大网段)
+_last_discover = [0.0]
+
+
+def device_mac_suffix(prefix):
+    """设备 prefix 末段就是 MAC 末四位(ulanzi_a2fa -> a2fa)。拿不到则空串。"""
+    tail = str(prefix or "").rsplit("_", 1)[-1].lower()
+    return tail if re.fullmatch(r"[0-9a-f]{4}", tail) else ""
+
+
+def _arp_find(suffix4):
+    """在系统 ARP 表里找 MAC 末四位匹配的地址。"""
+    try:
+        out = subprocess.run(["arp", "-an"], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return ""
+    for ip, mac in re.findall(r"\((\d+\.\d+\.\d+\.\d+)\) at ([0-9a-f:]{11,17})", out, re.I):
+        if mac.replace(":", "").lower().endswith(suffix4):
+            return ip
+    return ""
+
+
+def _own_net():
+    """本机所在网段(非环回的第一个 IPv4)。取不到返回 None。"""
+    try:
+        out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    for ip, mask in re.findall(r"inet (\d+\.\d+\.\d+\.\d+) netmask (0x[0-9a-f]+)", out):
+        if ip.startswith("127."):
+            continue
+        return ipaddress.ip_network(f"{ip}/{bin(int(mask, 16)).count('1')}", strict=False)
+    return None
+
+
+def _prime_arp(net):
+    """向网段内地址各发一个 UDP 空包, 逼内核把它们 ARP 解析进表。不等回应。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setblocking(False)
+    for n, h in enumerate(net.hosts()):
+        if n >= DISCOVER_CAP:
+            break
+        try:
+            s.sendto(b"", (str(h), 9))          # discard 端口: 对方不必回应
+        except OSError:
+            pass
+    s.close()
+
+
+def discover_device(prefix):
+    """按 prefix 里的 MAC 末四位找出设备 IP, 并用 /getBase 复核。找不到返回空串。"""
+    suffix = device_mac_suffix(prefix)
+    if not suffix:
+        return ""
+    for attempt in (1, 2):
+        ip = _arp_find(suffix)
+        if ip and valid_device(ip) and device_get(ip, "/getBase"):
+            return ip
+        if attempt == 1:                        # ARP 表里没有: 扫一遍网段再看
+            net = _own_net()
+            if net is None:
+                return ""
+            _prime_arp(net)
+            time.sleep(2)
+    return ""
+
+
+def maybe_rediscover():
+    """设备地址为空或连不上时重新发现并写回配置(冷却 DISCOVER_COOLDOWN 秒)。"""
+    dev = Handler.device
+    if dev and device_get(dev, "/getBase"):
+        return
+    if time.monotonic() - _last_discover[0] < DISCOVER_COOLDOWN:
+        return
+    _last_discover[0] = time.monotonic()
+    ip = discover_device(load_transport().get("prefix", ""))
+    if not ip or ip == dev:
+        return
+    Handler.device = ip
+    save_device(ip)
+    if dev:                                     # 插件线程里握的是旧地址, 停掉等用户重开
+        stop_for_restart(f"设备地址已变为 {ip}")
 
 
 # ---- MQTT 模式的重启检测 ----

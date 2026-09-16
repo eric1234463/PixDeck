@@ -41,6 +41,19 @@ class TestCodec(unittest.TestCase):
         self.assertIn(b"MQTT", pkt)             # protocol name
 
 
+class TestConnectFlags(unittest.TestCase):
+    def test_password_without_username_is_dropped(self):
+        """无 username 却带 password 是协议错误, broker 会直接断线 -> 必须丢掉 password。"""
+        pkt = mq.encode_connect("pixdeck", username=None, password="0812")
+        self.assertEqual(pkt[9] & 0xC0, 0)          # 连接标志: username/password 位都不置
+        self.assertNotIn(b"0812", pkt)
+
+    def test_username_and_password_both_flagged(self):
+        pkt = mq.encode_connect("pixdeck", username="u", password="p")
+        self.assertEqual(pkt[9] & 0xC0, 0xC0)
+        self.assertIn(b"p", pkt)
+
+
 import socket as _socket, threading as _threading
 
 
@@ -249,3 +262,65 @@ class TestStatusWatchLifecycle(unittest.TestCase):
                   {"transport": "mqtt", "broker": "", "prefix": "x"}):
             p.ensure_status_watch(t)
             self.assertIsNone(p._status_sub, t)
+
+
+ARP_SAMPLE = """? (10.0.0.5) at cc:c4:b2:77:a2:fa on en0 ifscope [ethernet]
+? (10.0.0.6) at (incomplete) on en0 ifscope [ethernet]
+? (10.0.0.7) at 0:10:db:ff:10:2 on en0 ifscope [ethernet]
+"""
+
+
+class _StubSubprocess:
+    def run(self, *a, **k):
+        class R:
+            stdout = ARP_SAMPLE
+        return R()
+
+
+class TestDeviceDiscovery(unittest.TestCase):
+    """ARP 发现的纯逻辑部分(不碰网络)。"""
+    def setUp(self):
+        self.panel = _load_panel()
+        self.tmp = os.path.join(ROOT, ".pixbar_test_discover.json")
+        self.panel.CONFIG_PATH = self.tmp
+        self.panel.save_transport({"transport": "mqtt", "prefix": "ulanzi_a2fa"})
+
+    def tearDown(self):
+        if os.path.exists(self.tmp):
+            os.remove(self.tmp)
+
+    def test_mac_suffix_from_prefix(self):
+        f = self.panel.device_mac_suffix
+        self.assertEqual(f("ulanzi_a2fa"), "a2fa")
+        self.assertEqual(f("awtrix"), "")               # 非 4 位十六进制: 不猜
+        self.assertEqual(f(""), "")
+
+    def test_arp_find_by_mac_suffix(self):
+        self.panel.subprocess = _StubSubprocess()
+        self.assertEqual(self.panel._arp_find("a2fa"), "10.0.0.5")
+        self.assertEqual(self.panel._arp_find("beef"), "")   # 不在表里
+
+    def test_rediscover_writes_back_and_stops_plugins(self):
+        p = self.panel
+        app = next(iter(p.RUNNERS))
+        r = p.RUNNERS[app]
+        r.active = True
+        r.stop = r.thread = None
+        p.Handler.device = "192.168.9.99"                    # 旧地址连不上
+        p._arp_find = lambda suffix: "192.168.9.42"
+        p.device_get = lambda dev, path, timeout=3: None if dev == "192.168.9.99" else {"ip": dev}
+        p.maybe_rediscover()
+        self.assertEqual(p.Handler.device, "192.168.9.42")
+        self.assertEqual(p.load_device(), "192.168.9.42")    # 写回配置
+        self.assertEqual(p.load_transport()["prefix"], "ulanzi_a2fa")   # 其它键不被抹掉
+        self.assertFalse(r.running())                        # 线程握的是旧地址 -> 停掉
+        self.assertIn("设备地址已变为 192.168.9.42", r.log[-2])
+
+    def test_rediscover_is_rate_limited(self):
+        p = self.panel
+        p.device_get = lambda *a, **k: None
+        p._arp_find = lambda suffix: "192.168.9.42"
+        p.Handler.device = "192.168.9.99"
+        p._last_discover[0] = p.time.monotonic()             # 刚扫过
+        p.maybe_rediscover()
+        self.assertEqual(p.Handler.device, "192.168.9.99")   # 冷却期内不扫
