@@ -324,3 +324,49 @@ class TestDeviceDiscovery(unittest.TestCase):
         p._last_discover[0] = p.time.monotonic()             # 刚扫过
         p.maybe_rediscover()
         self.assertEqual(p.Handler.device, "192.168.9.99")   # 冷却期内不扫
+
+
+class TestDisconnectAutoStop(unittest.TestCase):
+    """失联 -> 自动停 -> 设备回来 -> 自动恢复。"""
+    def setUp(self):
+        self.panel = _load_panel()
+        self.app = next(iter(self.panel.RUNNERS))
+        self.r = self.panel.RUNNERS[self.app]
+        self.r.active = True                        # 伪装成运行中, 不起真线程
+        self.r.stop = self.r.thread = None
+        self.r.interval = 3
+        self.started = []
+        self.r.start = lambda device, interval: self.started.append((device, interval))
+
+    def _unreachable(self, ticks):
+        self.panel.device_get = lambda *a, **k: None
+        for _ in range(ticks):
+            self.panel.watchdog_tick("10.0.0.2")
+
+    def test_short_outage_keeps_plugin_running(self):
+        self._unreachable(self.panel.UNREACHABLE_STOP - 1)
+        self.assertTrue(self.r.running())           # wifi 抖动不该停
+        self.assertEqual(self.panel._autostopped, {})
+
+    def test_sustained_outage_stops_and_remembers_intent(self):
+        self._unreachable(self.panel.UNREACHABLE_STOP)
+        self.assertFalse(self.r.running())
+        self.assertEqual(self.panel._autostopped, {self.app: 3})
+        self.assertIn("设备失联", self.r.log[-2])
+
+    def test_device_back_resumes_with_same_interval(self):
+        self._unreachable(self.panel.UNREACHABLE_STOP + 2)
+        self.panel.device_get = lambda *a, **k: {"apps": []}
+        self.panel.watchdog_tick("10.0.0.2")
+        self.assertEqual(self.started, [("10.0.0.2", 3)])
+        self.assertEqual(self.panel._autostopped, {})   # 恢复一次就清掉
+        self.assertEqual(self.panel._unreachable[0], 0)
+
+    def test_restart_stop_does_not_auto_resume(self):
+        """设备重启导致的停止不进 _autostopped: 画面还给设备, 等用户自己抢回来。"""
+        self.panel.stop_for_restart("设备重启(mqtt 上线)")
+        self.assertFalse(self.r.running())
+        self.assertEqual(self.panel._autostopped, {})
+        self.panel.device_get = lambda *a, **k: {"apps": []}
+        self.panel.watchdog_tick("10.0.0.2")
+        self.assertEqual(self.started, [])

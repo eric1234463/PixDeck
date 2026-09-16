@@ -62,6 +62,13 @@ starts, an address change stops the running plugins rather than trying to swap i
 coupling: ARP matches the MAC suffix carried by the **MQTT topic prefix**, so that setting has to stay filled
 in even under HTTP, where the gear hides its input.
 
+**Why a plugin stopped decides whether it comes back.** A sustained outage (`UNREACHABLE_STOP` ticks with no
+answer — you walked out with the laptop) stops the plugins but records the intent in `_autostopped`, and the
+first reachable tick starts them again at the same interval. A device restart stops them without that record:
+the screen has been handed back to the clock, so only the user decides when to take it again. Manual toggling
+clears the record, and the clock itself cannot be cleaned up once out of reach — the stock firmware ignores a
+custom app's `lifetime`, so a component keeps showing its last frame until something deletes it.
+
 **Almost nothing persists.** `.pixbar.json` (gitignored) holds only the device address and transport settings.
 Plugin on/off, interval, options and all attachments are in-memory and gone on restart — `--start` is the only
 way to bring a plugin up automatically. `_load_config()` returns `{}` on any read error, so a save after a bad

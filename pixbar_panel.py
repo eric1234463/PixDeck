@@ -401,8 +401,11 @@ def device_status(device):
 # 只判"曾见过"的组件: 插件刚开还没推出第一帧(或 frame_for 暂时无数据)时不会被误停。
 WATCHDOG_PERIOD = 5                     # 轮询 customList 的间隔秒数
 WATCHDOG_MISS = 2                       # 连续缺席几次才停(抗 wifi 抖动/单次请求失败)
+UNREACHABLE_STOP = 6                    # 连续不可达多少次(x WATCHDOG_PERIOD 秒)后停插件
 _seen_on_device = set()                 # 确认过在设备上出现的组件名
 _miss = {}                              # app -> 连续缺席次数
+_unreachable = [0]                      # 连续不可达次数
+_autostopped = {}                       # 因失联被自动停的插件 app -> interval(用户意图仍是"开")
 
 
 def stop_for_restart(reason, apps=None):
@@ -416,11 +419,28 @@ def stop_for_restart(reason, apps=None):
             r.stop_run()                    # 不传 device: 组件已不在设备上, 无需再推删除
 
 
+def resume_autostopped(device):
+    """失联期间被自动停掉的插件: 设备回来就自动开回去 —— 用户的意图本来就是"开", 是网络插手。
+    设备重启导致的停止不走这里: 那种情况画面已经还给设备, 由用户决定何时抢回来。"""
+    for app, iv in list(_autostopped.items()):
+        del _autostopped[app]
+        RUNNERS[app]._emit(f"{time.strftime('%H:%M:%S')}  设备回来了, 自动恢复")
+        RUNNERS[app].start(device, iv)
+
+
 def watchdog_tick(device):
     """对比设备组件列表与运行中的插件, 停掉组件已消失的那些。"""
     cl = device_get(device, "/api/customList")
-    if cl is None:                      # 设备不可达: 不判(离线 != 重启)
+    if cl is None:                      # 设备不可达: 不判组件消失(离线 != 重启)
+        _unreachable[0] += 1
+        if _unreachable[0] == UNREACHABLE_STOP:      # 只在跨过阈值那一刻动手
+            _autostopped.update({a: r.interval for a, r in RUNNERS.items() if r.running()})
+            if _autostopped:
+                stop_for_restart(f"设备失联 {UNREACHABLE_STOP * WATCHDOG_PERIOD}s")
         return
+    if _unreachable[0]:                 # 设备回来了
+        _unreachable[0] = 0
+        resume_autostopped(device)
     names = set(cl.get("apps", []))
     for app, r in RUNNERS.items():
         if not r.running():
@@ -710,6 +730,7 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 return self._send(400, json.dumps({"error": "bad interval"}))
             interval = max(1, min(86400, interval))    # 钳到合理范围, 防异常值
+            _autostopped.pop(app, None)               # 手动操作覆盖"失联自动恢复"的意图
             r.start(Handler.device, interval) if on else r.stop_run(Handler.device)
             return self._send(200, json.dumps(r.snapshot()))
         if u.path == "/api/interval":
