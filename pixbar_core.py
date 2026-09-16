@@ -62,7 +62,8 @@ def push(device, app, frame, force=False):
         return
     req = urllib.request.Request(f"http://{device}/api/custom?name={app}",
                                  data=body.encode(), headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=10) as r:
+    with urllib.request.urlopen(req, timeout=2) as r:      # 局域网 RTT 是毫秒级; 超时要短过推帧节奏,
+                                                           # 否则设备离线时一次推送就卡死整个循环
         r.read()
 
 
