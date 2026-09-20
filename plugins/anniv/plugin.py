@@ -58,7 +58,7 @@ ITEMS = ["names", "days"]
 OPTIONS = [
     {"key": "names", "label": "名字(用 & 隔开)", "type": "text", "default": _saved("names") or "US & TWO"},
     {"key": "date", "label": "纪念日(YYYY-MM-DD)", "type": "text", "default": _saved("date") or "2020-01-01"},
-    core.color_option("#FF6FB5"),
+    core.color_option("#FFD000"),     # 数字默认琥珀色: 粉色数字跟粉色卡比在两米外糊成一片
 ]
 SCREEN_W, SCREEN_H = 52, 16
 TEXT_X, TEXT_W, CHAR_W = 16, 36, 6    # 左 16px 留给图, 右 36px 放字
@@ -75,9 +75,9 @@ KIRBY = """
 .PPPPPPPPPP.
 PPPPPPPPPPPP
 PPWWPPPPWWPP
-PPDDPPPPDDPP
-BBDDPPPPDDBB
-PPPPPMMPPPPP
+PPkkPPPPkkPP
+PPkkPPPPkkPP
+BBPPPkkPPPBB
 PPPPPPPPPPPP
 .PPPPPPPPPP.
 ..PPPPPPPP..
@@ -89,13 +89,13 @@ YUKIO = """
 .WWWWWWWWWW.
 .WWWWWWWWWW.
 .WWkkWWkkWW.
+.WWkkWWkkWW.
 .WWWWWWWWWW.
 .WWWWkkWWWW.
 .WWWWWWWWWW.
 ..WWWWWWWW..
 ...WWWWWW...
 .WWWWWWWWWW.
-...WWWWWW...
 ...WW..WW...
 """
 HEART = """
@@ -106,11 +106,14 @@ HHHHHHH
 ..HHH..
 ...H...
 """
-# 卡比: P 粉身 W 白高光 D 深蓝眼 B 腮红 M 嘴 R 红脚
+# 卡比: P 粉身 W 白高光 k 眼和嘴(不点亮) B 腮红 R 红脚
+# 眼和嘴用"不点亮"而不是深色: 在这块屏上深蓝 #24325E 和深红 #C03050 都糊成一团脏色,
+# 黑洞反而是唯一读得出的五官。腮红也从轮廓边挪进脸里, 挪之前根本看不出是腮红。
 # Yukio: W 纯白身体 k 脸上的黑(其实就是不点亮, 屏幕本来是黑的)
-PALETTE = {"P": 0xFFAEC9, "W": 0xFFFFFF, "D": 0x24325E, "B": 0xFF5C8A, "M": 0xC03050,
-           "R": 0xE23A3A, "Y": 0xFFD000, "H": 0xFF3D6E}
-YUKIO_PALETTE = {"W": 0xFFFFFF, "k": 0}
+PALETTE = {"P": 0xFFAEC9, "W": 0xFFFFFF, "k": 0, "B": 0xFF5C8A, "R": 0xE23A3A, "H": 0xFF3D6E}
+# 纯白 0xFFFFFF 在这块 LED 上会晕开, 把眼缝和嘴糊住(实拍看得很清楚); 压一档到冷白就不晕了。
+# 同理眼睛画两行高: 一行高的缝会被相邻白点的光吃掉。
+YUKIO_PALETTE = {"W": 0xE0E0EA, "k": 0}
 PAIR_W = 12                           # 两个角色各占的宽度
 PAIR_PAD = 2                          # 公仔与数字之间的缝; 没有它数字会贴到卡比脸上
 PAIR_TEXT_X = PAIR_W + PAIR_PAD
