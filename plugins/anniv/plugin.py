@@ -74,15 +74,18 @@ KIRBY = """
 ...PPPPPP...
 .PPPPPPPPPP.
 PPPPPPPPPPPP
+PPPPPPPPPPPP
 PPWWPPPPWWPP
 PPkkPPPPkkPP
 PPkkPPPPkkPP
 BBPPPkkPPPBB
 PPPPPPPPPPPP
+PPPPPPPPPPPP
 .PPPPPPPPPP.
 ..PPPPPPPP..
-.RRRR..RRRR.
-.RRRR..RRRR.
+.RR..PP..RR.
+RRRR....RRRR
+RRRR....RRRR
 """
 YUKIO = """
 ...WWWWWW...
@@ -111,6 +114,8 @@ HHHHHHH
 ...H...
 """
 # 卡比: P 粉身 W 白高光 k 眼和嘴(不点亮) B 腮红 R 红脚
+# 12x15: 身子仍是 12x12 的正圆(卡比是个球, 拉长成蛋就不是他了), 多出来的三行给脚 ——
+# 脚从球底往两边叉开, 才是站着的卡比而不是一颗漂浮的球。
 # 眼和嘴用"不点亮"而不是深色: 在这块屏上深蓝 #24325E 和深红 #C03050 都糊成一团脏色,
 # 黑洞反而是唯一读得出的五官。腮红也从轮廓边挪进脸里, 挪之前根本看不出是腮红。
 # Yukio: W 纯白身体 k 脸上的黑(其实就是不点亮, 屏幕本来是黑的)
