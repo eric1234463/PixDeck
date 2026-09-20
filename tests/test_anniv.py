@@ -133,6 +133,15 @@ class TestRemember(unittest.TestCase):
         anniv._remember("date", "2019-02-14")
         self.assertEqual(json.load(open(self.tmp.name)), {"anniv_date": "2019-02-14"})
 
+    def test_unchanged_options_do_not_rewrite_the_file(self):
+        # 面板可能同时在写这份文件(两边都是读-改-写, 没有锁), 值没变就别白写一次
+        json.dump({"anniv_date": "2019-02-14", "anniv_names": "AMY & BEN"}, open(self.tmp.name, "w"))
+        anniv._seen.clear()
+        anniv._seen.update({k: v for k in anniv.CONFIG_KEYS if (v := anniv._saved(k))})
+        before = os.stat(self.tmp.name).st_mtime_ns
+        anniv._current({"date": "2019-02-14", "names": "AMY & BEN"})
+        self.assertEqual(os.stat(self.tmp.name).st_mtime_ns, before)
+
     def test_half_typed_date_is_not_saved(self):
         # 面板里一个字一个字打 "2019-02-1" 的中间态不该覆盖掉已存的好日期
         json.dump({"anniv_date": "2019-02-14"}, open(self.tmp.name, "w"))
