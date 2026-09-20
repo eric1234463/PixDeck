@@ -89,16 +89,18 @@ YUKIO = """
 .WWWWWWWWWW.
 WWWWWWWWWWWs
 WWkkWWWWkkWs
-WWWWWWWWWWWs
-WWWWWkkWWWWs
-WWWWWWWWWWss
-.WWWWWWWWss.
-..WWWWWsss..
-...WWWWss...
-.WWWWWWWWss.
+WWWWWkWWWWWs
+WWWWWkWWWWss
 .WWWWWWWWss.
 ..WWWWWWss..
-...WW..ss...
+.WWWWWWWWss.
+WWsWWWWWWsss
+WWsWWWWWWsss
+WWsWWWWWWsss
+.WWWWWWWWss.
+...WWWWWW...
+...WW..WW...
+...WW..WW...
 """
 HEART = """
 .HH.HH.
@@ -194,11 +196,12 @@ def build_frame(spec, color, duration):
             els.append(_text_el(b, hx + HEART_W + 1, color))
         return {"duration": duration, "draw": [sprite(HEART, hx, 5)], "text": els}
     if spec["layout"] == "pair":          # 卡比 + 数字 + 小樱, 左右等宽等缝
-        y = (SCREEN_H - PAIR_W) // 2
-        draw = [sprite(KIRBY, 0, y), sprite(YUKIO, SCREEN_W - PAIR_W, y, YUKIO_PALETTE)]
+        # 两只高度不同(卡比是球 12 行, Yukio 是站着的小人 16 行), 各自按自己的高度垂直居中
+        draw = [sprite(KIRBY, 0, _mid(KIRBY)),
+                sprite(YUKIO, SCREEN_W - PAIR_W, _mid(YUKIO), YUKIO_PALETTE)]
         return {"duration": duration, "draw": draw,
                 "text": [_text_el(text, _centered(text, PAIR_TEXT_X, PAIR_TEXT_W), color)]}
-    draw = [sprite(KIRBY, 1, 1)]          # 数字太长: 只留卡比, 右边 36px 放字
+    draw = [sprite(KIRBY, 1, _mid(KIRBY))]   # 数字太长: 只留卡比, 右边 36px 放字
     return {"duration": duration, "draw": draw,
             "text": [_text_el(text, _centered(text, TEXT_X, TEXT_W), color)]}
 
