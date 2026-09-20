@@ -58,7 +58,7 @@ ITEMS = ["names", "days"]
 OPTIONS = [
     {"key": "names", "label": "名字(用 & 隔开)", "type": "text", "default": _saved("names") or "US & TWO"},
     {"key": "date", "label": "纪念日(YYYY-MM-DD)", "type": "text", "default": _saved("date") or "2020-01-01"},
-    core.color_option("#FF6FB5"),
+    core.color_option("#FFD000"),     # 数字默认琥珀色: 粉色数字跟粉色卡比在两米外糊成一片
 ]
 SCREEN_W, SCREEN_H = 52, 16
 TEXT_X, TEXT_W, CHAR_W = 16, 36, 6    # 左 16px 留给图, 右 36px 放字
@@ -74,28 +74,35 @@ KIRBY = """
 ...PPPPPP...
 .PPPPPPPPPP.
 PPPPPPPPPPPP
+PPPPPPPPPPPP
 PPWWPPPPWWPP
-PPDDPPPPDDPP
-BBDDPPPPDDBB
-PPPPPMMPPPPP
+PPkkPPPPkkPP
+PPkkPPPPkkPP
+BBPPPkkPPPBB
+PPPPPPPPPPPP
 PPPPPPPPPPPP
 .PPPPPPPPPP.
 ..PPPPPPPP..
-.RRRR..RRRR.
-.RRRR..RRRR.
+.RR..PP..RR.
+RRRR....RRRR
+RRRR....RRRR
 """
 YUKIO = """
 ...WWWWWW...
 .WWWWWWWWWW.
-.WWWWWWWWWW.
-.WWkkWWkkWW.
-.WWWWWWWWWW.
-.WWWWkkWWWW.
-.WWWWWWWWWW.
-..WWWWWWWW..
+WWWWWWWWWWWs
+WWkkWWWWkkWs
+WWWWWkWWWWWs
+WWWWWkWWWWss
+.WWWWWWWWss.
+..WWWWWWss..
+.WWWWWWWWss.
+WWsWWWWWWsss
+WWsWWWWWWsss
+WWsWWWWWWsss
+.WWWWWWWWss.
 ...WWWWWW...
-.WWWWWWWWWW.
-...WWWWWW...
+...WW..WW...
 ...WW..WW...
 """
 HEART = """
@@ -106,11 +113,16 @@ HHHHHHH
 ..HHH..
 ...H...
 """
-# 卡比: P 粉身 W 白高光 D 深蓝眼 B 腮红 M 嘴 R 红脚
+# 卡比: P 粉身 W 白高光 k 眼和嘴(不点亮) B 腮红 R 红脚
+# 12x15: 身子仍是 12x12 的正圆(卡比是个球, 拉长成蛋就不是他了), 多出来的三行给脚 ——
+# 脚从球底往两边叉开, 才是站着的卡比而不是一颗漂浮的球。
+# 眼和嘴用"不点亮"而不是深色: 在这块屏上深蓝 #24325E 和深红 #C03050 都糊成一团脏色,
+# 黑洞反而是唯一读得出的五官。腮红也从轮廓边挪进脸里, 挪之前根本看不出是腮红。
 # Yukio: W 纯白身体 k 脸上的黑(其实就是不点亮, 屏幕本来是黑的)
-PALETTE = {"P": 0xFFAEC9, "W": 0xFFFFFF, "D": 0x24325E, "B": 0xFF5C8A, "M": 0xC03050,
-           "R": 0xE23A3A, "Y": 0xFFD000, "H": 0xFF3D6E}
-YUKIO_PALETTE = {"W": 0xFFFFFF, "k": 0}
+PALETTE = {"P": 0xFFAEC9, "W": 0xFFFFFF, "k": 0, "B": 0xFF5C8A, "R": 0xE23A3A, "H": 0xFF3D6E}
+# 纯白 0xFFFFFF 在这块 LED 上会晕开, 把眼缝和嘴糊住(实拍看得很清楚); 压一档到冷白就不晕了。
+# 同理眼睛画两行高: 一行高的缝会被相邻白点的光吃掉。
+YUKIO_PALETTE = {"W": 0xFFF2E0, "s": 0x9C8A72, "k": 0}
 PAIR_W = 12                           # 两个角色各占的宽度
 PAIR_PAD = 2                          # 公仔与数字之间的缝; 没有它数字会贴到卡比脸上
 PAIR_TEXT_X = PAIR_W + PAIR_PAD
@@ -167,6 +179,10 @@ def _text_el(content, x, color):
     return {"content": content, "fontHeight": 10, "x": x, "y": 3, "color": color}
 
 
+def _mid(art):
+    return (SCREEN_H - len(art.strip("\n").split("\n"))) // 2
+
+
 def _centered(text, left, width):
     return left + max(0, (width - len(text) * CHAR_W) // 2)
 
@@ -185,11 +201,12 @@ def build_frame(spec, color, duration):
             els.append(_text_el(b, hx + HEART_W + 1, color))
         return {"duration": duration, "draw": [sprite(HEART, hx, 5)], "text": els}
     if spec["layout"] == "pair":          # 卡比 + 数字 + 小樱, 左右等宽等缝
-        y = (SCREEN_H - PAIR_W) // 2
-        draw = [sprite(KIRBY, 0, y), sprite(YUKIO, SCREEN_W - PAIR_W, y, YUKIO_PALETTE)]
+        # 两只高度不同(卡比是球 12 行, Yukio 是站着的小人 16 行), 各自按自己的高度垂直居中
+        draw = [sprite(KIRBY, 0, _mid(KIRBY)),
+                sprite(YUKIO, SCREEN_W - PAIR_W, _mid(YUKIO), YUKIO_PALETTE)]
         return {"duration": duration, "draw": draw,
                 "text": [_text_el(text, _centered(text, PAIR_TEXT_X, PAIR_TEXT_W), color)]}
-    draw = [sprite(KIRBY, 1, 1)]          # 数字太长: 只留卡比, 右边 36px 放字
+    draw = [sprite(KIRBY, 1, _mid(KIRBY))]   # 数字太长: 只留卡比, 右边 36px 放字
     return {"duration": duration, "draw": draw,
             "text": [_text_el(text, _centered(text, TEXT_X, TEXT_W), color)]}
 
