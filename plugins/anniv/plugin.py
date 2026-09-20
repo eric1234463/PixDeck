@@ -122,7 +122,7 @@ HHHHHHH
 PALETTE = {"P": 0xFFAEC9, "W": 0xFFFFFF, "k": 0, "B": 0xFF5C8A, "R": 0xE23A3A, "H": 0xFF3D6E}
 # 纯白 0xFFFFFF 在这块 LED 上会晕开, 把眼缝和嘴糊住(实拍看得很清楚); 压一档到冷白就不晕了。
 # 同理眼睛画两行高: 一行高的缝会被相邻白点的光吃掉。
-YUKIO_PALETTE = {"W": 0xE8E8F0, "s": 0x8A90A6, "k": 0}
+YUKIO_PALETTE = {"W": 0xFFF2E0, "s": 0x9C8A72, "k": 0}
 PAIR_W = 12                           # 两个角色各占的宽度
 PAIR_PAD = 2                          # 公仔与数字之间的缝; 没有它数字会贴到卡比脸上
 PAIR_TEXT_X = PAIR_W + PAIR_PAD
