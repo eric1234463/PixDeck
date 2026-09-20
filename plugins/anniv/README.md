@@ -64,6 +64,28 @@ python3 plugins/anniv/plugin.py --device <IP>          # 之后这样就够, 名
 python3 -m unittest tests.test_anniv
 ```
 
+### 挂在一台常开的机器上
+
+这块屏的画面是一帧一帧推出来的, 没有进程推就不会变。macOS 上用 launchd 开机自启,
+本目录有现成模板 `com.pixdeck.anniv.plist`:
+
+```bash
+sed "s|__PIXDECK__|$PWD|g; s|__DEVICE__|<时钟IP>|g" plugins/anniv/com.pixdeck.anniv.plist \
+  > ~/Library/LaunchAgents/com.pixdeck.anniv.plist
+
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.pixdeck.anniv.plist   # 装
+launchctl kickstart -k gui/$(id -u)/com.pixdeck.anniv                             # 改完代码重启
+launchctl bootout gui/$(id -u)/com.pixdeck.anniv                                  # 卸
+tail -f /tmp/pixdeck-anniv.log                                                    # 看日志
+```
+
+跑的是插件自己而不是面板 —— **两者别指同一台钟**: 面板开机会扫掉设备上所有本工具的组件,
+运行中的 `reconcile()` 也会删掉"插件没在面板里开着"的组件, 而 standalone 推的这个对面板来说
+正是"没开着"。
+
+`KeepAlive` 让它挂了自动重起, `ThrottleInterval 30` 防止写错参数时疯狂重启。
+LaunchAgent 只在登录态下跑, 机器睡了它也睡 —— 要真的常年准, 这台机器就别让它睡。
+
 ### 已知取舍
 
 - **要有进程在推**。停掉进程画面会**定格在最后一屏**（stock firmware 忽略 custom app 的 `lifetime`，

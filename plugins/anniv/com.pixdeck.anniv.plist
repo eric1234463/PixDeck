@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 开机自启模板: 把 __PIXDECK__ 换成本仓库绝对路径、__DEVICE__ 换成时钟 IP, 拷到
+     ~/Library/LaunchAgents/ 再 bootstrap。用法见同目录 README.md 的「挂在一台常开的机器上」。
+     这里跑的是插件自己(standalone), 不是面板: 面板开机会扫掉设备上的组件, 两者别指同一台钟。 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.pixdeck.anniv</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__PIXDECK__/plugins/anniv/plugin.py</string>
+    <string>--device</string>
+    <string>__DEVICE__</string>
+  </array>
+  <key>WorkingDirectory</key><string>__PIXDECK__</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>/tmp/pixdeck-anniv.log</string>
+  <key>StandardErrorPath</key><string>/tmp/pixdeck-anniv.log</string>
+</dict>
+</plist>
