@@ -8,7 +8,7 @@
   python3 pixbar_panel.py                 # 启动后浏览器开 http://127.0.0.1:8000
   python3 pixbar_panel.py --device <IP> --port 8000
 """
-import argparse, ipaddress, json, os, threading, time, urllib.request
+import argparse, ipaddress, json, os, re, socket, subprocess, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 
@@ -71,6 +71,7 @@ def apply_transport(t):
                              broker_port=int(port) if port.isdigit() else 1883,
                              prefix=t.get("prefix", ""), username=t.get("mqtt_user") or None,
                              password=t.get("mqtt_pass") or None, retain=bool(t.get("retain")))
+    ensure_status_watch(t)                  # mqtt: 订阅设备 LWT, 重启时停插件
 
 
 def valid_device(s):
@@ -394,6 +395,198 @@ def device_status(device):
     }
 
 
+# ---- 设备重启看门狗 ----
+# 组件在设备上"曾出现过又消失" = 设备重启(或用户手删)。此时停掉插件, 画面留在设备内建 app,
+# 等用户手动再开; 否则插件下一帧会把 DIY 组件重建, 画面立刻被抢回去。
+# 只判"曾见过"的组件: 插件刚开还没推出第一帧(或 frame_for 暂时无数据)时不会被误停。
+WATCHDOG_PERIOD = 5                     # 轮询 customList 的间隔秒数
+WATCHDOG_MISS = 2                       # 连续缺席几次才停(抗 wifi 抖动/单次请求失败)
+UNREACHABLE_STOP = 6                    # 连续不可达多少次(x WATCHDOG_PERIOD 秒)后停插件
+_seen_on_device = set()                 # 确认过在设备上出现的组件名
+_miss = {}                              # app -> 连续缺席次数
+_unreachable = [0]                      # 连续不可达次数
+_autostopped = {}                       # 因失联被自动停的插件 app -> interval(用户意图仍是"开")
+
+
+def stop_for_restart(reason, apps=None):
+    """设备重启后停掉运行中的插件: 不再推帧, 画面留在设备内建 app, 等用户手动再开。"""
+    for app in (apps if apps is not None else list(RUNNERS)):
+        r = RUNNERS[app]
+        _seen_on_device.discard(app)
+        _miss.pop(app, None)
+        if r.running():
+            r._emit(f"{time.strftime('%H:%M:%S')}  {reason}, 停止插件")
+            r.stop_run()                    # 不传 device: 组件已不在设备上, 无需再推删除
+
+
+def resume_autostopped(device):
+    """失联期间被自动停掉的插件: 设备回来就自动开回去 —— 用户的意图本来就是"开", 是网络插手。
+    设备重启导致的停止不走这里: 那种情况画面已经还给设备, 由用户决定何时抢回来。"""
+    for app, iv in list(_autostopped.items()):
+        del _autostopped[app]
+        RUNNERS[app]._emit(f"{time.strftime('%H:%M:%S')}  设备回来了, 自动恢复")
+        RUNNERS[app].start(device, iv)
+
+
+def watchdog_tick(device):
+    """对比设备组件列表与运行中的插件, 停掉组件已消失的那些。"""
+    cl = device_get(device, "/api/customList")
+    if cl is None:                      # 设备不可达: 不判组件消失(离线 != 重启)
+        _unreachable[0] += 1
+        if _unreachable[0] == UNREACHABLE_STOP:      # 只在跨过阈值那一刻动手
+            _autostopped.update({a: r.interval for a, r in RUNNERS.items() if r.running()})
+            if _autostopped:
+                stop_for_restart(f"设备失联 {UNREACHABLE_STOP * WATCHDOG_PERIOD}s")
+        return
+    if _unreachable[0]:                 # 设备回来了
+        _unreachable[0] = 0
+        resume_autostopped(device)
+    names = set(cl.get("apps", []))
+    for app, r in RUNNERS.items():
+        if not r.running():
+            _seen_on_device.discard(app)
+            _miss.pop(app, None)
+        elif app in names:
+            _seen_on_device.add(app)
+            _miss[app] = 0
+        elif app in _seen_on_device:
+            _miss[app] = _miss.get(app, 0) + 1
+            if _miss[app] >= WATCHDOG_MISS:
+                stop_for_restart("设备重启: 组件已从设备消失", [app])
+
+
+def watchdog_loop():
+    while True:
+        time.sleep(WATCHDOG_PERIOD)
+        try:
+            if Handler.device:
+                watchdog_tick(Handler.device)
+            maybe_rediscover()          # 地址空/连不上时自愈(换网段、DHCP 续约)
+        except Exception:
+            pass
+
+
+# ---- 设备地址自动发现 (ARP) ----
+# 换网段/DHCP 续约后设备 IP 会变。不能靠 MQTT 发现: <prefix>/status 之类的信号都要求设备
+# 已经连上正确的 broker —— 而 broker 就跑在本机, 本机 IP 一变设备就连不上, 什么都收不到。
+# ARP 是二层, 不需要设备连 broker、也不需要它先跟我们通信: 先向本网段每个地址发一个 UDP
+# 空包(内核为送出这包必须先 ARP 解析), 再按 MAC 末四位认出设备。前提是同网段且 AP 未开
+# 客户端隔离。SHORTCUT: 只认 MAC 末四位; 同网段撞尾四位的概率极低, 命中后还用 /getBase 复核。
+DISCOVER_COOLDOWN = 60                  # 两次扫描之间的最短间隔(秒)
+DISCOVER_CAP = 1024                     # 单次最多探多少个地址(挡住大网段)
+_last_discover = [0.0]
+
+
+def device_mac_suffix(prefix):
+    """设备 prefix 末段就是 MAC 末四位(ulanzi_a2fa -> a2fa)。拿不到则空串。"""
+    tail = str(prefix or "").rsplit("_", 1)[-1].lower()
+    return tail if re.fullmatch(r"[0-9a-f]{4}", tail) else ""
+
+
+def _arp_find(suffix4):
+    """在系统 ARP 表里找 MAC 末四位匹配的地址。"""
+    try:
+        out = subprocess.run(["arp", "-an"], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return ""
+    for ip, mac in re.findall(r"\((\d+\.\d+\.\d+\.\d+)\) at ([0-9a-f:]{11,17})", out, re.I):
+        if mac.replace(":", "").lower().endswith(suffix4):
+            return ip
+    return ""
+
+
+def _own_net():
+    """本机所在网段(非环回的第一个 IPv4)。取不到返回 None。"""
+    try:
+        out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    for ip, mask in re.findall(r"inet (\d+\.\d+\.\d+\.\d+) netmask (0x[0-9a-f]+)", out):
+        if ip.startswith("127."):
+            continue
+        return ipaddress.ip_network(f"{ip}/{bin(int(mask, 16)).count('1')}", strict=False)
+    return None
+
+
+def _prime_arp(net):
+    """向网段内地址各发一个 UDP 空包, 逼内核把它们 ARP 解析进表。不等回应。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setblocking(False)
+    for n, h in enumerate(net.hosts()):
+        if n >= DISCOVER_CAP:
+            break
+        try:
+            s.sendto(b"", (str(h), 9))          # discard 端口: 对方不必回应
+        except OSError:
+            pass
+    s.close()
+
+
+def discover_device(prefix):
+    """按 prefix 里的 MAC 末四位找出设备 IP, 并用 /getBase 复核。找不到返回空串。"""
+    suffix = device_mac_suffix(prefix)
+    if not suffix:
+        return ""
+    for attempt in (1, 2):
+        ip = _arp_find(suffix)
+        if ip and valid_device(ip) and device_get(ip, "/getBase"):
+            return ip
+        if attempt == 1:                        # ARP 表里没有: 扫一遍网段再看
+            net = _own_net()
+            if net is None:
+                return ""
+            _prime_arp(net)
+            time.sleep(2)
+    return ""
+
+
+def maybe_rediscover():
+    """设备地址为空或连不上时重新发现并写回配置(冷却 DISCOVER_COOLDOWN 秒)。"""
+    dev = Handler.device
+    if dev and device_get(dev, "/getBase"):
+        return
+    if time.monotonic() - _last_discover[0] < DISCOVER_COOLDOWN:
+        return
+    _last_discover[0] = time.monotonic()
+    ip = discover_device(load_transport().get("prefix", ""))
+    if not ip or ip == dev:
+        return
+    Handler.device = ip
+    save_device(ip)
+    if dev:                                     # 插件线程里握的是旧地址, 停掉等用户重开
+        stop_for_restart(f"设备地址已变为 {ip}")
+
+
+# ---- MQTT 模式的重启检测 ----
+# mqtt 模式下设备 IP 常常连不上(换网段/AP 隔离), 上面的 customList 看门狗形同失效。
+# 设备自己会在 <prefix>/status 上报 online/offline(LWT), 订阅它即可:
+#   retained 的 online = 订阅瞬间 broker 补发的"当前状态", 不是事件, 必须忽略;
+#   非 retained 的 online = 设备刚连上来 = 重启过 -> 停插件。
+_status_sub = None
+
+
+def on_device_status(payload, retained):
+    if retained or payload.strip() != "online":
+        return
+    stop_for_restart("设备重启(mqtt 上线)")
+
+
+def ensure_status_watch(t):
+    """按当前传输配置建立/关闭 <prefix>/status 订阅。传输设置一改就重建。"""
+    global _status_sub
+    if _status_sub:
+        _status_sub.close()
+        _status_sub = None
+    host, _, port = str(t.get("broker", "")).partition(":")
+    prefix = str(t.get("prefix", "")).strip("/")
+    if t.get("transport") != "mqtt" or not host or not prefix:
+        return
+    import pixbar_mqtt
+    _status_sub = pixbar_mqtt.MqttSubscriber(
+        host, int(port) if port.isdigit() else 1883, f"{prefix}/status", on_device_status,
+        username=t.get("mqtt_user") or None, password=t.get("mqtt_pass") or None)
+
+
 class Handler(BaseHTTPRequestHandler):
     device = ""                          # 设备 IP: 启动时从配置载入, 或在界面齿轮里设置
 
@@ -537,6 +730,7 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 return self._send(400, json.dumps({"error": "bad interval"}))
             interval = max(1, min(86400, interval))    # 钳到合理范围, 防异常值
+            _autostopped.pop(app, None)               # 手动操作覆盖"失联自动恢复"的意图
             r.start(Handler.device, interval) if on else r.stop_run(Handler.device)
             return self._send(200, json.dumps(r.snapshot()))
         if u.path == "/api/interval":
@@ -563,6 +757,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default=None, help="设备 IP(可选; 不填则用上次界面里设置的, 或留空在网页里填)")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--start", default="", help="启动后自动开启的插件(逗号分隔), 如 --start agent")
     args = ap.parse_args()
     raw = args.device if args.device is not None else load_device()
     Handler.device = valid_device(raw)       # 私网 IPv4 校验; 非法则视为未设置
@@ -580,6 +775,12 @@ def main():
                     core.push(Handler.device, name, {}, force=True)
                 except Exception:
                     pass
+    for name in [x.strip() for x in args.start.split(",") if x.strip()]:
+        if name in RUNNERS:
+            RUNNERS[name].start(Handler.device, RUNNERS[name].mod.DEFAULT_INTERVAL)
+        else:
+            print(f"警告: --start {name} 不是已发现的插件, 已忽略")
+    threading.Thread(target=watchdog_loop, daemon=True).start()   # 设备重启 -> 停掉插件, 不抢回画面
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"pixbar_panel -> http://127.0.0.1:{args.port}  (device {Handler.device or '未设置 — 在网页里填'})")
     print(f"plugins: {', '.join(RUNNERS) or '(none)'}")

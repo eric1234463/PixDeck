@@ -1,4 +1,4 @@
-"""MQTT 发布端单元测试(纯标准库 unittest)。
+"""MQTT 传输 + 设备重启检测的单元测试(纯标准库 unittest)。
 
 编码/解码对拍: encode_publish 出的字节能被自带的 decode_publish 解回同样的 topic/payload。
 不依赖 mqtt_sniff.py(它是 gitignore 的本地工具)。
@@ -39,6 +39,19 @@ class TestCodec(unittest.TestCase):
         pkt = mq.encode_connect("pixdeck", keepalive=0)
         self.assertEqual(pkt[0], 0x10)          # CONNECT type
         self.assertIn(b"MQTT", pkt)             # protocol name
+
+
+class TestConnectFlags(unittest.TestCase):
+    def test_password_without_username_is_dropped(self):
+        """无 username 却带 password 是协议错误, broker 会直接断线 -> 必须丢掉 password。"""
+        pkt = mq.encode_connect("pixdeck", username=None, password="0812")
+        self.assertEqual(pkt[9] & 0xC0, 0)          # 连接标志: username/password 位都不置
+        self.assertNotIn(b"0812", pkt)
+
+    def test_username_and_password_both_flagged(self):
+        pkt = mq.encode_connect("pixdeck", username="u", password="p")
+        self.assertEqual(pkt[9] & 0xC0, 0xC0)
+        self.assertIn(b"p", pkt)
 
 
 import socket as _socket, threading as _threading
@@ -174,3 +187,186 @@ class TestPanelTransportConfig(unittest.TestCase):
         self.assertEqual(vb("169.254.169.254"), "")               # 元数据/链路本地挡住
         self.assertEqual(self.panel.valid_device("127.0.0.1"), "")  # 设备仍禁环回(不受影响)
 
+
+class TestSubscribeCodec(unittest.TestCase):
+    def test_subscribe_packet_shape(self):
+        pkt = mq.encode_subscribe("ulanzi_a2fa/status")
+        self.assertEqual(pkt[0], 0x82)                      # SUBSCRIBE type + QoS1 flags
+        self.assertEqual(pkt[2:4], b"\x00\x01")             # packet id
+        self.assertIn(b"ulanzi_a2fa/status", pkt)
+        self.assertEqual(pkt[-1], 0)                        # requested QoS 0
+
+
+class TestRestartDetection(unittest.TestCase):
+    """设备重启检测的判定规则(不碰网络; 线程与 socket 由 test_mqtt 的真 broker 部分覆盖)。"""
+    def setUp(self):
+        self.panel = _load_panel()
+        self.app = next(iter(self.panel.RUNNERS))
+        self.r = self.panel.RUNNERS[self.app]
+        self.r.active = True                    # 伪装成运行中, 不起真线程
+        self.r.stop = self.r.thread = None
+        self.stopped = []
+        self.panel.stop_for_restart = lambda reason, apps=None: self.stopped.append((reason, apps))
+
+    def test_retained_online_is_state_not_event(self):
+        self.panel.on_device_status("online", True)         # 订阅瞬间 broker 补发的现状
+        self.assertEqual(self.stopped, [])
+
+    def test_offline_does_not_stop(self):
+        self.panel.on_device_status("offline", False)       # 掉线 != 重启; 回来才算
+        self.assertEqual(self.stopped, [])
+
+    def test_live_online_stops_plugins(self):
+        self.panel.on_device_status("online", False)        # 设备刚连上来 = 重启过
+        self.assertEqual(len(self.stopped), 1)
+
+    def test_watchdog_needs_seen_then_missing_twice(self):
+        p = self.panel
+        p.device_get = lambda *a, **k: {"apps": []}
+        p.watchdog_tick("10.0.0.1"); p.watchdog_tick("10.0.0.1")
+        self.assertEqual(self.stopped, [])                  # 从未出现过的组件不判(第一帧未推出)
+        p.device_get = lambda *a, **k: {"apps": [self.app]}
+        p.watchdog_tick("10.0.0.1")
+        p.device_get = lambda *a, **k: {"apps": []}
+        p.watchdog_tick("10.0.0.1")
+        self.assertEqual(self.stopped, [])                  # 单次缺席 = wifi 抖动
+        p.device_get = lambda *a, **k: None
+        p.watchdog_tick("10.0.0.1")
+        self.assertEqual(self.stopped, [])                  # 设备不可达: 不判, 也不累加
+        self.assertEqual(p._miss[self.app], 1)
+        p.device_get = lambda *a, **k: {"apps": []}
+        p.watchdog_tick("10.0.0.1")
+        self.assertEqual(len(self.stopped), 1)              # 连续两次缺席 -> 停
+        self.assertEqual(self.stopped[0][1], [self.app])
+
+    def test_stop_for_restart_clears_state_and_logs(self):
+        p2 = _load_panel()                                  # 干净模块: 用真的 stop_for_restart
+        app = self.app
+        r = p2.RUNNERS[app]
+        r.active = True
+        r.stop = r.thread = None
+        p2._seen_on_device.add(app)
+        p2._miss[app] = 1
+        p2.stop_for_restart("设备重启(mqtt 上线)")
+        self.assertFalse(r.running())
+        self.assertNotIn(app, p2._seen_on_device)
+        self.assertNotIn(app, p2._miss)
+        self.assertIn("设备重启(mqtt 上线)", r.log[-2])
+
+
+class TestStatusWatchLifecycle(unittest.TestCase):
+    def test_http_mode_and_missing_prefix_start_no_subscription(self):
+        p = _load_panel()
+        for t in ({"transport": "http", "broker": "10.0.0.2:1883", "prefix": "x"},
+                  {"transport": "mqtt", "broker": "10.0.0.2:1883", "prefix": ""},
+                  {"transport": "mqtt", "broker": "", "prefix": "x"}):
+            p.ensure_status_watch(t)
+            self.assertIsNone(p._status_sub, t)
+
+
+ARP_SAMPLE = """? (10.0.0.5) at cc:c4:b2:77:a2:fa on en0 ifscope [ethernet]
+? (10.0.0.6) at (incomplete) on en0 ifscope [ethernet]
+? (10.0.0.7) at 0:10:db:ff:10:2 on en0 ifscope [ethernet]
+"""
+
+
+class _StubSubprocess:
+    def run(self, *a, **k):
+        class R:
+            stdout = ARP_SAMPLE
+        return R()
+
+
+class TestDeviceDiscovery(unittest.TestCase):
+    """ARP 发现的纯逻辑部分(不碰网络)。"""
+    def setUp(self):
+        self.panel = _load_panel()
+        self.tmp = os.path.join(ROOT, ".pixbar_test_discover.json")
+        self.panel.CONFIG_PATH = self.tmp
+        self.panel.save_transport({"transport": "mqtt", "prefix": "ulanzi_a2fa"})
+
+    def tearDown(self):
+        if os.path.exists(self.tmp):
+            os.remove(self.tmp)
+
+    def test_mac_suffix_from_prefix(self):
+        f = self.panel.device_mac_suffix
+        self.assertEqual(f("ulanzi_a2fa"), "a2fa")
+        self.assertEqual(f("awtrix"), "")               # 非 4 位十六进制: 不猜
+        self.assertEqual(f(""), "")
+
+    def test_arp_find_by_mac_suffix(self):
+        self.panel.subprocess = _StubSubprocess()
+        self.assertEqual(self.panel._arp_find("a2fa"), "10.0.0.5")
+        self.assertEqual(self.panel._arp_find("beef"), "")   # 不在表里
+
+    def test_rediscover_writes_back_and_stops_plugins(self):
+        p = self.panel
+        app = next(iter(p.RUNNERS))
+        r = p.RUNNERS[app]
+        r.active = True
+        r.stop = r.thread = None
+        p.Handler.device = "192.168.9.99"                    # 旧地址连不上
+        p._arp_find = lambda suffix: "192.168.9.42"
+        p.device_get = lambda dev, path, timeout=3: None if dev == "192.168.9.99" else {"ip": dev}
+        p.maybe_rediscover()
+        self.assertEqual(p.Handler.device, "192.168.9.42")
+        self.assertEqual(p.load_device(), "192.168.9.42")    # 写回配置
+        self.assertEqual(p.load_transport()["prefix"], "ulanzi_a2fa")   # 其它键不被抹掉
+        self.assertFalse(r.running())                        # 线程握的是旧地址 -> 停掉
+        self.assertIn("设备地址已变为 192.168.9.42", r.log[-2])
+
+    def test_rediscover_is_rate_limited(self):
+        p = self.panel
+        p.device_get = lambda *a, **k: None
+        p._arp_find = lambda suffix: "192.168.9.42"
+        p.Handler.device = "192.168.9.99"
+        p._last_discover[0] = p.time.monotonic()             # 刚扫过
+        p.maybe_rediscover()
+        self.assertEqual(p.Handler.device, "192.168.9.99")   # 冷却期内不扫
+
+
+class TestDisconnectAutoStop(unittest.TestCase):
+    """失联 -> 自动停 -> 设备回来 -> 自动恢复。"""
+    def setUp(self):
+        self.panel = _load_panel()
+        self.app = next(iter(self.panel.RUNNERS))
+        self.r = self.panel.RUNNERS[self.app]
+        self.r.active = True                        # 伪装成运行中, 不起真线程
+        self.r.stop = self.r.thread = None
+        self.r.interval = 3
+        self.started = []
+        self.r.start = lambda device, interval: self.started.append((device, interval))
+
+    def _unreachable(self, ticks):
+        self.panel.device_get = lambda *a, **k: None
+        for _ in range(ticks):
+            self.panel.watchdog_tick("10.0.0.2")
+
+    def test_short_outage_keeps_plugin_running(self):
+        self._unreachable(self.panel.UNREACHABLE_STOP - 1)
+        self.assertTrue(self.r.running())           # wifi 抖动不该停
+        self.assertEqual(self.panel._autostopped, {})
+
+    def test_sustained_outage_stops_and_remembers_intent(self):
+        self._unreachable(self.panel.UNREACHABLE_STOP)
+        self.assertFalse(self.r.running())
+        self.assertEqual(self.panel._autostopped, {self.app: 3})
+        self.assertIn("设备失联", self.r.log[-2])
+
+    def test_device_back_resumes_with_same_interval(self):
+        self._unreachable(self.panel.UNREACHABLE_STOP + 2)
+        self.panel.device_get = lambda *a, **k: {"apps": []}
+        self.panel.watchdog_tick("10.0.0.2")
+        self.assertEqual(self.started, [("10.0.0.2", 3)])
+        self.assertEqual(self.panel._autostopped, {})   # 恢复一次就清掉
+        self.assertEqual(self.panel._unreachable[0], 0)
+
+    def test_restart_stop_does_not_auto_resume(self):
+        """设备重启导致的停止不进 _autostopped: 画面还给设备, 等用户自己抢回来。"""
+        self.panel.stop_for_restart("设备重启(mqtt 上线)")
+        self.assertFalse(self.r.running())
+        self.assertEqual(self.panel._autostopped, {})
+        self.panel.device_get = lambda *a, **k: {"apps": []}
+        self.panel.watchdog_tick("10.0.0.2")
+        self.assertEqual(self.started, [])

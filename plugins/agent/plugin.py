@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """agent — Agent 监控（主信息流插件, macOS）
 
-显示本机 Claude Code 的活动: 几个会话在跑、此刻是否正在生成、并行子 agent 数。
+显示本机 Claude Code 的活动: 几个会话在跑、此刻是否正在生成/等你回应、并行子 agent 数。
+数据优先来自 hook(准确、即时): 见 hook.py 与 README.md; 未装 hook 时退回轮询探测:
 - 活跃会话 = ~/.claude/projects/*/*.jsonl 中近 ACTIVE 秒内有更新的(每份=一个会话)。
 - 正在执行(busy) = 任一 claude 进程 CPU 超阈值(工具等待期间 transcript 不动, 故用 CPU 补)。
 - 子 agent = 各会话 <session>/subagents/ 下近 SUB 秒内活动的 transcript 数。
-画面: 左侧大数字=会话数(忙绿/闲白); 右侧扫描灯(忙时脉动); 底部黄点=子 agent 数。
+画面: 左侧 Claude Code 小人常驻; 忙=扛锄头走路, 等你回应=闪问号, 闲=躺平睡觉飘 Z; 右侧两条用量条(5h/7d), 底部黄点=子 agent 数。
 
 单独运行: python3 plugins/agent/plugin.py [--device IP] [--dry-run] [--once]
 """
-import os, sys, glob, re, subprocess, time
+import os, sys, glob, json, re, subprocess, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import pixbar_core as core
 
@@ -21,32 +22,144 @@ DEFAULT_INTERVAL = 1
 ITEMS = ["agent"]
 
 PROJ = os.path.expanduser("~/.claude/projects")
+HOOKDIR = os.path.expanduser("~/.pixdeck/agent")   # hook.py 写的会话状态; 目录不存在=未装 hook
+LIMITS = os.path.expanduser("~/.pixdeck/limits.json")   # statusline 写的 5h/7d 用量; 见 README
 ACTIVE, SUB = 180, 40               # 活跃会话窗 / 子agent 窗(秒)
 CPU_BUSY = 8.0                      # claude 进程 CPU 超此值视为"正在生成"
 TICK = 0.4                          # 推帧/动画节奏
 POLL_EVERY = 5                      # 每 5 帧(2s)重新扫描一次状态
-SCANX0, SCANX1 = 22, 49            # 扫描灯轨道
-GREEN, WHITE, DIM, GRAY, SUBC = "#3EE08A", "#E9EBEE", "#2A3038", "#5B626D", "#FFD000"
+SUBC, DIM = "#FFD000", "#2A3038"
+AMBER = "#FF6400"                   # 等你回应(权限请求/通知)
+CLAUDE = "#D97757"                  # Claude 品牌橙: 小人常驻此色, 不用颜色区分状态
+HOECOL = "#C9D4E0"                  # 锄头: 钢灰蓝, 与橙色身体拉开, 一眼看出手上有家伙
+
+# Claude Code 小人 16x10(按官方像素图量的格): 身体 + 两条竖眼缝 + 横贯手臂 + 四条腿。
+#   ..############..
+#   ..##.######.##..   <- 眼(挖空成背景色)
+#   ################   <- 手臂横贯全宽
+#   ..############..
+#   ...#.#....#.#...   <- 四条腿
+# 状态不靠颜色, 靠形态: 闲=躺平闭眼+飘 Z; 忙=扛锄头走路(腿交替+锄头挥动); 等待=睁眼+闪问号。
+SX, SY = 0, 4                       # 小人在 52x16 上的左上角; 留出 y0..3 给头顶的 Z
+BODY, ARMS = (2, 0, 12, 8), (0, 4, 16, 2)
+EYES, LEGS = (4, 11), (3, 5, 10, 12)
+ZZZ = {"Z": ("###", ".#.", "###")}  # 头顶 3x3 的 Z; 三态小人尺寸一致, 睡觉只闭眼 + 飘 Z
+ZX = 12                             # Z 的 x: 头部右上角(身体右缘 x13), 斜着往右上飘
+BG = "#000000"                      # 挖眼用: 设备底色
+# 锄头两帧: (手柄起点x,y, 终点x,y, 锄刃x,y) — 扛起 / 落地, 与走路同步 = 一边走一边锄
+HOE = [((16, 4), (19, 1), (19, 0)), ((16, 5), (19, 8), (19, 8))]
+DOTX = 19                           # 子agent 黄点的 x
+# wait 是唯一需要你动手的状态, 所以给它三重信号: 大问号 + 闪烁边框 + 瞪大眼。
+QX, QY = 17, 3                      # 5x9 大问号的位置(小人 x0..15 与标签 x23 之间)
+QCOL = 0xFFD000                     # 问号用黄; 边框留橙, 两层分得开
+FONTQ = {"?": (".###.", "#...#", "#...#", "....#", "...#.", "..#..", "..#..", ".....", "..#..")}
+# 用量区 x23..50: 左边 3x5 迷你字标签, 右边进度条。上排=5 小时窗, 下排=7 天窗。
+# 设备字体 fontHeight 10 太高, 上下两排会互相压, 所以标签自己画。
+LABELX, BARX, BARW = 23, 32, 19
+ROW5H, ROW7D = 1, 9                 # 两排的顶端 y
+C5H, C7D = 0x00E5FF, 0x4285F4       # 青 / 蓝 — 两条窗口一眼分得开
+FONT35 = {"5": ("###", "#..", "###", "..#", "###"),
+          "7": ("###", "..#", ".#.", ".#.", ".#."),
+          "H": ("#.#", "#.#", "###", "#.#", "#.#"),
+          "D": ("##.", "#.#", "#.#", "#.#", "##.")}
 
 
-def _busy():
-    """任一 claude 进程 CPU 超阈值 = 此刻在生成。"""
+def label(x, y, text, color, font=FONT35):
+    """迷你字标签, 一条 db 位图指令(比逐段 df 省字节)。字宽高由字模自己决定。"""
+    gs = [font[c] for c in text]
+    gw, gh = len(gs[0][0]), len(gs[0])
+    px = []
+    for r in range(gh):
+        for i, g in enumerate(gs):
+            px += [color if g[r][c] == "#" else 0 for c in range(gw)]
+            if i < len(gs) - 1:
+                px.append(0)                        # 字间 1px 空隙
+    return {"db": [x, y, len(text) * (gw + 1) - 1, gh, px]}
+
+
+def border(color):
+    """整屏 1px 边框: 余光也看得见的闪烁提醒。画在最前, 小人会盖在它上面。"""
+    return [{"df": [0, 0, 52, 1, color]}, {"df": [0, 15, 52, 1, color]},
+            {"df": [0, 0, 1, 16, color]}, {"df": [51, 0, 1, 16, color]}]
+
+
+def little(color, walk=None, sleep=False, stare=False):
+    """小人的 draw 指令。三态共用同一尺寸; walk=0/1: 腿交替长短 + 扛锄头挥动; sleep: 闭眼。"""
+    d = [{"df": [BODY[0] + SX, BODY[1] + SY, BODY[2], BODY[3], color]},
+         {"df": [ARMS[0] + SX, ARMS[1] + SY, ARMS[2], ARMS[3], color]}]
+    for i, x in enumerate(LEGS):
+        h = 2 if walk is None or i % 2 == walk else 1
+        d.append({"df": [x + SX, 8 + SY, 1, h, color]})
+    if walk is not None:                                 # 手上的锄头(自己一个颜色)
+        (hx, hy), (tx, ty), (bx, by) = HOE[walk]
+        d.append({"dl": [hx + SX, hy + SY, tx + SX, ty + SY, HOECOL]})     # 手柄
+        d.append({"df": [bx + SX, by + SY, 2, 2, HOECOL]})                 # 锄刃
+    for x in EYES:
+        if sleep:                                                          # 闭眼: 一横(3 宽, 与睁眼同心)
+            d.append({"df": [x - 1 + SX, 3 + SY, 3, 1, BG]})
+        elif stare:                                                        # 瞪大眼: 眼缝加倍宽
+            d.append({"df": [x - (1 if x > 7 else 0) + SX, 2 + SY, 2, 2, BG]})
+        else:
+            d.append({"df": [x + SX, 2 + SY, 1, 2, BG]})
+    return d
+
+
+def _pct(d, now):
+    """一个窗口的已用百分比; 窗口已经滚过(now >= resets_at)则归零。"""
+    if not d:
+        return None
+    return 0 if now >= (d.get("resets_at") or 0) else d.get("used_percentage")
+
+
+def read_limits():
+    """读 statusline 写的用量 -> (5h%, 7d%); 没装/读不到返回 None。"""
     try:
-        out = subprocess.run(["ps", "-axo", "pcpu,args"], capture_output=True, text=True, timeout=5).stdout
+        with open(LIMITS) as f:
+            d = json.load(f)
     except Exception:
-        return False
-    for ln in out.splitlines():
-        if re.search(r"\bclaude\b", ln) and "plugins/" not in ln and "grep" not in ln:
-            try:
-                if float(ln.split()[0]) > CPU_BUSY:
-                    return True
-            except Exception:
-                pass
-    return False
+        return None
+    now = time.time()
+    a, b = _pct(d.get("five_hour"), now), _pct(d.get("seven_day"), now)
+    return None if a is None or b is None else (a, b)
+
+
+def usage_row(top, text, pct, rgb, phase):
+    """一排: 3x5 标签 + 进度条(暗底槽 + 彩色填充); 用满 90% 以上闪烁提醒。"""
+    hexc = "#%06X" % rgb
+    d = [label(LABELX, top, text, rgb), {"df": [BARX, top + 1, BARW, 3, DIM]}]
+    n = round(pct / 100 * BARW)
+    if n and (pct < 90 or (phase // 2) % 2 == 0):
+        d.append({"df": [BARX, top + 1, max(1, n), 3, hexc]})
+    return d
+
+
+def scan_hooks():
+    """读 hook 状态目录 -> (会话数, 子agent数, busy, wait); 未装 hook 返回 None。"""
+    if not os.path.isdir(HOOKDIR):
+        return None
+    now = time.time()
+    sessions = subs = 0
+    busy = wait = False
+    for f in glob.glob(HOOKDIR + "/*.json"):
+        try:
+            with open(f) as fh:
+                st = json.load(fh)
+        except Exception:
+            continue
+        if now - st.get("ts", 0) > ACTIVE:      # 会话崩了没发 SessionEnd: 超时即视为结束
+            continue
+        sessions += 1
+        subs += st.get("subs", 0)
+        busy = busy or st.get("state") == "busy"
+        wait = wait or st.get("state") == "wait"
+    return sessions, subs, busy, wait
 
 
 def scan():
-    """返回 (活跃会话数, 子agent数, busy)。"""
+    """返回 (活跃会话数, 子agent数, busy, wait)。有 hook 用 hook, 否则轮询探测。"""
+    hooked = scan_hooks()
+    if hooked is not None:
+        return hooked
     now = time.time()
     sessions = subs = 0
     for f in glob.glob(PROJ + "/*/*.jsonl"):
@@ -57,49 +170,46 @@ def scan():
         sub_dir = os.path.join(os.path.dirname(f), sid, "subagents")
         if os.path.isdir(sub_dir):
             subs += sum(1 for s in glob.glob(sub_dir + "/*.jsonl") if now - os.path.getmtime(s) < SUB)
-    return sessions, subs, _busy()
+    return sessions, subs, _busy(), False
 
 
-def render(sessions, subs, busy, phase, interval):
-    if sessions == 0:
-        return {"duration": interval, "text": [
-            {"content": "IDLE", "fontHeight": 10, "x": -1000, "y": 3,
-             "align": "center", "rect": [0, 0, 52, 16], "color": GRAY}]}
-    color = GREEN if busy else WHITE
-    text = [{"content": str(sessions), "fontHeight": 10, "x": 3, "y": 3, "color": color}]
-    draw = []
-    span = SCANX1 - SCANX0
-    if busy:                                       # 扫描灯来回扫
-        p = phase % (2 * span)
-        x = SCANX0 + (p if p <= span else 2 * span - p)
-        draw.append({"df": [x, 7, 3, 2, GREEN]})
-        draw.append({"dl": [SCANX0, 8, SCANX1 + 2, 8, DIM]})
-    else:                                          # 闲: 轨道上一颗暗点
-        draw.append({"dl": [SCANX0, 8, SCANX1 + 2, 8, DIM]})
-        draw.append({"df": [(SCANX0 + SCANX1) // 2, 7, 2, 2, GRAY]})
-    for k in range(min(subs, 10)):                 # 底部子agent 黄点
-        draw.append({"df": [SCANX0 + k * 3, 13, 2, 2, SUBC]})
-    return {"duration": interval, "text": text, "draw": draw}
+def render(sessions, subs, busy, wait, phase, interval):
+    """小人常驻(忙=扛锄头走路, 等待=大问号+闪框, 闲=闭眼飘 Z); 右侧 5H / 7D 用量条。"""
+    draw = border(AMBER) if wait and phase % 2 == 0 else []     # 边框画在最底层
+    draw += little(CLAUDE, walk=phase % 2 if busy else None,
+                   sleep=not busy and not wait, stare=wait)
+    lim = read_limits()
+    if lim:
+        draw += usage_row(ROW5H, "5H", lim[0], C5H, phase)
+        draw += usage_row(ROW7D, "7D", lim[1], C7D, phase)
+    if wait:                                       # 等你回应: 常亮大问号(闪的是边框)
+        draw.append(label(QX, QY, "?", QCOL, FONTQ))
+    elif not busy:                                 # 闲: 右上角的 Z 斜着往右上飘
+        zp = (phase // 4) % 2
+        draw.append(label(ZX + zp, 1 - zp, "Z", 0x5B626D, ZZZ))
+    for k in range(min(subs, 4)):                  # 底部子agent 黄点
+        draw.append({"df": [DOTX + k * 3, 14, 2, 2, SUBC]})
+    return {"duration": interval, "text": [], "draw": draw}
 
 
 def frame_for(item, interval):
-    s, sub, b = scan()
-    return render(s, sub, b, 0, interval), f"sessions={s} busy={b} subs={sub}"
+    s, sub, b, w = scan()
+    return render(s, sub, b, w, 0, interval), f"sessions={s} busy={b} wait={w} subs={sub}"
 
 
 def run_loop(device, interval, stop=None, log=print, dry_run=False, once=False, options=None):
     i = 0
-    cached = (0, 0, False)
+    cached = (0, 0, False, False)
     while stop is None or not stop.is_set():
         if i % POLL_EVERY == 0:
             cached = scan()
-        s, sub, b = cached
-        frame = render(s, sub, b, i, interval)
+        s, sub, b, w = cached
+        frame = render(s, sub, b, w, i, interval)
         if not dry_run:
             try: core.push(device, APP, frame)
             except Exception as e: log(f"  push fail: {e}")
         elif i % POLL_EVERY == 0:
-            log(f"{time.strftime('%H:%M:%S')}  sessions={s} busy={b} subs={sub}")
+            log(f"{time.strftime('%H:%M:%S')}  sessions={s} busy={b} wait={w} subs={sub}")
         i += 1
         if once:
             break

@@ -62,7 +62,8 @@ def push(device, app, frame, force=False):
         return
     req = urllib.request.Request(f"http://{device}/api/custom?name={app}",
                                  data=body.encode(), headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=10) as r:
+    with urllib.request.urlopen(req, timeout=2) as r:      # 局域网 RTT 是毫秒级; 超时要短过推帧节奏,
+                                                           # 否则设备离线时一次推送就卡死整个循环
         r.read()
 
 
@@ -179,12 +180,17 @@ def standalone(plugin):
     ap.add_argument("--interval", type=int, default=plugin.DEFAULT_INTERVAL)
     ap.add_argument("--dry-run", action="store_true", help="只取数+打印, 不推设备")
     ap.add_argument("--once", action="store_true", help="每项各一轮后退出")
+    ap.add_argument("--set", action="append", default=[], metavar="KEY=VAL",
+                    help="覆盖 OPTIONS 默认值(字符串), 可重复, 如 --set date=2019-02-14")
     a = ap.parse_args()
     if not a.device and not a.dry_run:
         print("请用 --device <设备IP> 指定像素时钟地址(或加 --dry-run 只打印不推送)")
         return
     print(f"{plugin.APP} -> {a.device or '(dry-run)'}  interval {a.interval}s{'  [dry-run]' if a.dry_run else ''}")
     opts = {o["key"]: o["default"] for o in getattr(plugin, "OPTIONS", [])}
+    for kv in a.set:
+        k, _, v = kv.partition("=")
+        opts[k] = v
     fn = loop_callable(plugin)
     try:
         fn(device=a.device, interval=a.interval, log=print, dry_run=a.dry_run, once=a.once, options=opts)
